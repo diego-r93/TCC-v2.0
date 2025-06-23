@@ -68,22 +68,17 @@ vTaskTdsDataProcess           1     2     Processa os dados do sensor de TDS e e
 #define TDS_DATA_PROCESS_DELAY 10000
 #define TDS_MOTOR_CONTROL_DELAY 500
 
-// Pump Timers configuration
-#define NUMBER_OUTPUTS 4
-#define ACTIVE_PUMPS 4
-
 // Motors configuration
-const uint8_t motorIDs[NUMBER_OUTPUTS] = {0, 1, 2, 3};  // 0=m1, 1=m2, 2=m3, 3=m4
-uint8_t myPumpStates[NUMBER_OUTPUTS] = {0, 0, 0, 0};    // Estados dos motores (0=off, 1=on)
-
 DRV8243Controller drvController;
 
-HydraulicPumpController myPumps[ACTIVE_PUMPS] = {
-    HydraulicPumpController("code04", motorIDs[0], 60000),
-    HydraulicPumpController("code05", motorIDs[1], 60000),
-    HydraulicPumpController("code06", motorIDs[2], 60000),
-    HydraulicPumpController("code07", motorIDs[3], 60000),
+HydraulicPumpController myPumps[] = {
+    {"code01", drvController, 0, 60000},
+    {"code02", drvController, 1, 60000},
+    {"code03", drvController, 2, 60000},
+    {"code04", drvController, 3, 60000},
 };
+
+const int numPumps = sizeof(myPumps) / sizeof(myPumps[0]);
 
 // NTP configuration
 #define CHECK_WIFI_DELAY 100
@@ -243,13 +238,16 @@ void callback(char* topic, byte* payload, unsigned int length) {
             Serial.print(" to ");
             Serial.println(state ? "on" : "off");
 
-            myPumpStates[indice] = state ? 1 : 0;
-            drvController.setMotorState(indice, state);
+            if (state)
+               myPumps[indice].startPump();
+            else
+               myPumps[indice].stopPump();
          }
       }
 
-      printf("Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n", myPumpStates[0], myPumpStates[1], myPumpStates[2], myPumpStates[3]);
-
+      Serial.printf("Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n",
+                    int(myPumps[0].getPumpState()), int(myPumps[1].getPumpState()),
+                    int(myPumps[2].getPumpState()), int(myPumps[3].getPumpState()));
       // Aplica os estados aos motores (a ordem dos índices corresponde aos motores M1 a M4)
       // DRV8243_SetMotors(myPumpStates[0], myPumpStates[1], myPumpStates[2], myPumpStates[3]);
 
@@ -271,8 +269,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
          for (int indice = 0; indice < NUMBER_OUTPUTS; indice++) {
             JsonObject port = ports[myPumps[indice].getCode()].to<JsonObject>();
-            port["gpio"] = myPumps[indice].getGpio();
-            port["state"] = myPumpStates[indice] == 1;
+            port["gpio"] = myPumps[indice].getMotorIndex();
+            port["state"] = myPumps[indice].getPumpState();
             port["pulseDuration"] = myPumps[indice].getPulseDuration();
 
             // Adicionar os driveTimes ao JSON
@@ -555,7 +553,7 @@ void initRtos() {
    xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 2048, NULL, 2, &MqttReconnectTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskNTP, "taskNTP", configMINIMAL_STACK_SIZE + 2048, NULL, 1, &NTPTaskHandle, PRO_CPU_NUM);
 
-   for (int indice = 0; indice < ACTIVE_PUMPS; indice++) {
+   for (int indice = 0; indice < numPumps; indice++) {
       xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &myPumps[indice], 3, &UpdateTaskHandle, PRO_CPU_NUM);
       xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &myPumps[indice], 3, &TurnOnPumpTaskHandle, APP_CPU_NUM);
    }
@@ -740,7 +738,7 @@ void vTaskUpdate(void* pvParameters) {
    while (1) {
       if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
          if (WiFi.status() == WL_CONNECTED) {
-            loadConfigurationCloud(pump->pumperCode, pump->getJsonDataPointer());
+            loadConfigurationCloud(pump->getCode(), pump->getJsonDataPointer());
             updateConfiguration(pump->getJsonData(), pump->getDriveTimesPointer(), pump->pulseDurationPointer);
 
             // Salvar os driveTimes atualizados apenas se houver conexão
