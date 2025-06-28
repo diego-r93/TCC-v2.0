@@ -1,12 +1,16 @@
 #include "Communication.h"
 
 void SPI_Init(void) {
-   DRV8243_CS_PIN_INIT;
+   SPI.begin();
+
    DRV8243_CS_PIN_OUT;
    DRV8243_CS_HIGH;
+
+   DRV8243_CS_PIN_OUT;
+   DRV8243_CS_HIGH;
+
    SDO_PIN_IN;
 
-   SPI.begin(SCK_PIN, SDO_PIN, SDI_PIN, DRV8243_CS_PIN);
    Serial.println("[SPI INIT] SPI configurado e iniciado");
 }
 

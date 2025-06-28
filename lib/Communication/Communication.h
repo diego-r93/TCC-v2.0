@@ -35,7 +35,6 @@
 #define DRV8243_CS_PIN_OUT pinMode(DRV8243_CS_PIN, OUTPUT)
 #define DRV8243_CS_LOW digitalWrite(DRV8243_CS_PIN, LOW)
 #define DRV8243_CS_HIGH digitalWrite(DRV8243_CS_PIN, HIGH)
-#define DRV8243_CS_PIN_INIT pinMode(DRV8243_CS_PIN, OUTPUT)
 
 #define SDO_PIN_IN pinMode(SDO_PIN, INPUT)
 #define GPIO1_STATE digitalRead(SDO_PIN)
