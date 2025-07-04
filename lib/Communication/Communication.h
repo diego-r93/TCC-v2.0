@@ -52,8 +52,15 @@
 #define GPIO1_STATE digitalRead(SDO_PIN)
 
 void SPI_Init(void);
+
 void SPI_Write(uint8_t addr, uint32_t data, uint8_t nbytes);
 uint32_t SPI_Read(uint8_t addr, uint8_t nbytes);
+
+int32_t SPI_Write_Buffer(uint8_t ui8_slave_id, uint8_t ui8_buffer[],
+                         uint8_t ui8_nr_bytes);
+int32_t SPI_Read_Buffer(uint8_t ui8_slave_id, uint8_t ui8_buffer[],
+                        uint8_t ui8_nr_bytes);
+
 void SPI_TransferFrame(const uint8_t *tx, uint8_t *rx, uint8_t len);
 
 #endif

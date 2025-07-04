@@ -17,6 +17,7 @@
 
 #include "AD7793.h"
 #include "CN0326.h"
+#include "CN0411.h"
 #include "Communication.h"
 #include "DRV8243Controller.h"
 #include "NTPClient.h"
@@ -48,8 +49,8 @@ vTaskSHT35SensorRead          1     1     Lê o sensor SHT35
 vTaskSHT35DataProcess         1     2     Processa os dados do sensor SHT35 e envia para o servidor
 vTaskPhSensorRead             1     1     Lê o sensor de pH
 vTaskPhDataProcess            1     2     Processa os dados do sensor de pH e envia para o servidor
-vTaskTdsSensorRead            1     1     Lê o sensor de TDS
-vTaskTdsDataProcess           1     2     Processa os dados do sensor de TDS e envia para o servidor
+vTaskECSensorRead             1     1     Lê o sensor de condutividade elétrica (EC)
+vTaskECDataProcess            1     2     Processa os dados do sensor de condutividade elétrica (EC) e envia para o servidor
 --------------------------------------------------------------------------------------------------------------------------
 */
 
@@ -71,6 +72,37 @@ vTaskTdsDataProcess           1     2     Processa os dados do sensor de TDS e e
 #define TDS_SENSOR_READ_DELAY 10000
 #define TDS_DATA_PROCESS_DELAY 10000
 #define TDS_MOTOR_CONTROL_DELAY 500
+
+struct cn0411_init_params cn0411_init_params = {
+    CH_GAIN_RES_20M,
+    ADC_SINGLE_CONV,
+    RTD_RES_1K,
+    {GAIN_RES_20,
+     GAIN_RES_200,
+     GAIN_RES_2K,
+     GAIN_RES_20K,
+     GAIN_RES_200K,
+     GAIN_RES_2M,
+     GAIN_RES_20M},
+    OFFSET_RES_INIT,
+    DAC_OUT_DEFAULT_VAL,
+    EXC_DEFAULT_VAL,
+    VR20S_DEFAULT_VAL,
+    VR200S_DEFAULT_VAL,
+    RDRES_DEFAULT_VAL,
+    EXC_DEFAULT_VAL,
+    CELL_CONST_NORMAL,
+    TEMP_DEFAULT_VAL,
+    VPP_DEFAULT_VAL,
+    VINP_DEFAULT_VAL,
+    VINN_DEFAULT_VAL,
+    COND_DEFAULT_VAL,
+    COMP_COND_DEFAULT_VAL,
+    TDS_DEFAULT_VAL,
+    {TEMP_COEFF_NACL,
+     TDS_NACL}};
+
+struct cn0411_device cn0411_dev;
 
 // Motors configuration
 DRV8243Controller drvController;
@@ -177,9 +209,9 @@ TaskHandle_t PhSensorReadTaskHandle = NULL;
 TaskHandle_t PhDataProcessTaskHandle = NULL;
 TaskHandle_t PhMotorControlTaskHandle = NULL;
 
-TaskHandle_t TdsSensorReadTaskHandle = NULL;
-TaskHandle_t TdsDataProcessTaskHandle = NULL;
-TaskHandle_t TdsMotorControlTaskHandle = NULL;
+TaskHandle_t ECSensorReadTaskHandle = NULL;
+TaskHandle_t ECDataProcessTaskHandle = NULL;
+TaskHandle_t ECMotorControlTaskHandle = NULL;
 
 // FreeRTOS Task Functions
 void vTaskUpdate(void* pvParameters);
@@ -199,8 +231,8 @@ void vTaskSHT35DataProcess(void* pvParameters);
 void vTaskPhSensorRead(void* pvParameters);
 void vTaskPhDataProcess(void* pvParameters);
 
-void vTaskTdsSensorRead(void* pvParameters);
-void vTaskTdsDataProcess(void* pvParameters);
+void vTaskECSensorRead(void* pvParameters);
+void vTaskECDataProcess(void* pvParameters);
 
 String getDateTime(const RtcDateTime& dt) {
    char datestring[26];
@@ -484,7 +516,16 @@ void initPhSensor() {
    CN0326_Init();
 }
 
-void initTdsSensor() {
+void initECSensor() {
+   uint32_t ret;
+
+   ret = CN0411_init(&cn0411_dev, cn0411_init_params);
+
+   if (ret == CN0411_FAILURE) {
+      Serial.printf("CN0411 Initialization error!\n");
+   }
+
+   Serial.printf("CN0411 Initialization successful!\n");
 }
 
 void initDS3234() {
@@ -571,8 +612,8 @@ void initRtos() {
    xTaskCreatePinnedToCore(vTaskPhSensorRead, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
 
-   xTaskCreatePinnedToCore(vTaskTdsSensorRead, "TDS Meter Task", 4096, NULL, 1, &TdsSensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskTdsDataProcess, "TDS Data Process Task", 4096, NULL, 2, &TdsDataProcessTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskECSensorRead, "EC Meter Task", 4096, NULL, 1, &ECSensorReadTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskECDataProcess, "EC Data Process Task", 4096, NULL, 2, &ECDataProcessTaskHandle, APP_CPU_NUM);
 
    Serial.println("RTOS initialized");
 }
@@ -651,8 +692,8 @@ void setup() {
    initds18b20Sensor();
 
    initDRV8243Configuration();
-   initTdsSensor();
    initPhSensor();
+   initECSensor();
 
    initServer();
    initRtos();
@@ -1075,16 +1116,75 @@ void vTaskPhDataProcess(void* pvParameters) {
    }
 }
 
-void vTaskTdsSensorRead(void* pvParameters) {
-   while (1) {
-      if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
-         xSemaphoreGive(xSPIMutex);
-      }
-      vTaskDelay(pdMS_TO_TICKS(TDS_SENSOR_READ_DELAY));
+// void vTaskECSensorRead(void* pvParameters) {
+//    static float dac_voltage = 0.0;
+//    static bool ascending = true;
+
+//    while (1) {
+//       if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
+//          printf("🔐 SPIMutex acquired in vTaskECSensorRead.\n");
+//          // Escreve no DAC
+//          CN0411_DAC_set_value(&cn0411_dev, dac_voltage);
+
+//          // Lê a tensão atual no DAC via ADC (canal 3)
+//          if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
+//             printf("[ERRO] Falha ao ler a tensão do DAC.\n");
+//          } else {
+//             printf("Tensão DAC escrita: %.2f V | Tensão DAC lida: %.5f V\n",
+//                    dac_voltage, cn0411_dev.read_dac);
+//          }
+
+//          xSemaphoreGive(xSPIMutex);
+//          printf("🔓 SPIMutex released after vTaskECSensorRead.\n");
+//       } else {
+//          printf("⚠️ Timeout while trying to acquire xSPIMutex in vTaskECSensorRead\n");
+//       }
+
+//       // Atualiza tensão do DAC
+//       if (ascending) {
+//          dac_voltage += 0.1;
+//          if (dac_voltage >= 2.0) {
+//             dac_voltage = 2.0;
+//             ascending = false;
+//          }
+//       } else {
+//          dac_voltage -= 0.1;
+//          if (dac_voltage <= 0.0) {
+//             dac_voltage = 0.0;
+//             ascending = true;
+//          }
+//       }
+
+//       vTaskDelay(pdMS_TO_TICKS(2000));  // Espera 2 segundos
+//    }
+// }
+
+void vTaskECSensorRead(void* pvParameters) {
+   // Define tensão DAC
+   CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
+
+   // Define resistor de ganho
+   CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
+
+   // Define frequência PWM e duty cycle
+   CN0411_pwm_freq(PWM_FREQ_94, 50);
+
+   // Laço principal da task
+   while (true) {
+      // PWM principal com 50% duty
+      digitalWrite(PWM_MAIN_PIN, HIGH);
+      digitalWrite(PWM_POS_PIN, HIGH);
+      digitalWrite(PWM_NEG_PIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+
+      digitalWrite(PWM_MAIN_PIN, LOW);
+      digitalWrite(PWM_POS_PIN, LOW);
+      digitalWrite(PWM_NEG_PIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
    }
 }
 
-void vTaskTdsDataProcess(void* pvParameters) {
+void vTaskECDataProcess(void* pvParameters) {
    while (1) {
       vTaskDelay(pdMS_TO_TICKS(TDS_DATA_PROCESS_DELAY));
    }

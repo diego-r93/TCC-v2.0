@@ -95,6 +95,106 @@ uint32_t SPI_Read(uint8_t ui8address, uint8_t ui8bytes) {
 }
 
 /**
+   @brief Reads a specified register address in the converter via SPI.
+
+   @param ui8_slave_id - slave id for chip select
+   @param ui8_address - register address
+   @param ui8_nr_bytes - register number of bytes
+
+   @return reading result
+
+**/
+int32_t SPI_Read_Buffer(uint8_t ui8_slave_id, uint8_t ui8_buffer[],
+                        uint8_t ui8_nr_bytes) {
+   int32_t ret = 0;
+
+   DRV8243_CS_HIGH;
+   AD7793_CS_HIGH;
+
+   /*Clear Slave based on ID */
+
+   switch (ui8_slave_id) {
+      case 0:
+         digitalWrite(AD7124_CS_PIN, LOW);
+         SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE3));
+         break;
+      case 1:
+         digitalWrite(AD5683_CS_PIN, LOW);
+         SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE2));
+         break;
+   }
+
+   SPI.transfer(ui8_buffer, ui8_nr_bytes);
+
+   SPI.endTransaction();
+
+   /*Set Slave based on ID */
+   switch (ui8_slave_id) {
+      case 0:
+         digitalWrite(AD7124_CS_PIN, HIGH);
+         break;
+      case 1:
+         digitalWrite(AD5683_CS_PIN, HIGH);
+         break;
+   }
+
+   if (ui8_nr_bytes == 0)
+      ret = -1;
+
+   return ret;
+}
+
+/**
+   @brief Writes a register to the Converter via SPI.
+
+   @param ui8_slave_id - slave id for chip select
+   @param ui8_address - ACC register address
+   @param ui32_data - value to be written
+   @param ui8_nr_bytes - nr of bytes to be written
+
+   @return none
+
+**/
+int32_t SPI_Write_Buffer(uint8_t ui8_slave_id, uint8_t ui8_buffer[],
+                         uint8_t ui8_nr_bytes) {
+   int32_t ret = 0;
+
+   if (ui8_nr_bytes > 4) {
+      ui8_nr_bytes = 4;
+   }
+
+   /*Clear Slave based on ID */
+   switch (ui8_slave_id) {
+      case 0:
+         digitalWrite(AD7124_CS_PIN, LOW);
+         SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE3));
+         break;
+      case 1:
+         digitalWrite(AD5683_CS_PIN, LOW);
+         SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE2));
+         break;
+   }
+
+   SPI.transfer(ui8_buffer, ui8_nr_bytes);
+   SPI.endTransaction();
+
+   /*Set Slave based on ID */
+   switch (ui8_slave_id) {
+      case 0:
+         digitalWrite(AD7124_CS_PIN, HIGH);
+         break;
+      case 1:
+         digitalWrite(AD5683_CS_PIN, HIGH);
+         break;
+   }
+
+   if (ui8_nr_bytes == 0)
+      ret = -1;
+
+   return ret;
+}
+
+/**
  @brief Full‑duplex transfer of an arbitrary SPI frame.
 
  @param tx   Pointer to bytes to transmit.
