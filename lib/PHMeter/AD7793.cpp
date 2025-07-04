@@ -7,6 +7,8 @@
 #include <SPI.h>
 
 #include "Communication.h"  // Communication definitions.
+#include "freertos/semphr.h"
+extern SemaphoreHandle_t xSPIMutex;
 
 /********************************* Global data ********************************/
 
@@ -22,8 +24,6 @@ const uint8_t reg_size[8] = {1, 2, 2, 3, 1, 1, 3, 3};
 void AD7793_Init(void) {
    uint32_t ui32reg_value;
 
-   SPI_Init();  // SPI Initialization.
-
    AD7793_Reset();  // Reset ADC converter.
 
    ui32reg_value = (uint32_t)(AD7793_GAIN << 8);  // Set ADC gain
@@ -32,9 +32,9 @@ void AD7793_Init(void) {
 
    AD7793_WriteRegister(AD7793_REG_CONF, ui32reg_value);  // Set configuration options
 
-   ui32reg_value = AD7793_ReadRegister(AD7793_REG_CONF);
+   // ui32reg_value = AD7793_ReadRegister(AD7793_REG_CONF);
 
-   AD7793_WriteRegister(AD7793_REG_CONF, ui32reg_value);
+   // AD7793_WriteRegister(AD7793_REG_CONF, ui32reg_value);
 
    AD7793_WriteRegister(AD7793_REG_IO, 0x02);  // Set IOUT2 to 210 uA
 }
@@ -44,9 +44,8 @@ void AD7793_Init(void) {
  *
  * @return  None.
  *******************************************************************************/
-void AD7793_Reset(void) {   
+void AD7793_Reset(void) {
    SPI_Write(0, 0, 4);  // Write 4 bytes = 0xFF
-   // delay(1);
 }
 
 /**
@@ -91,32 +90,36 @@ void AD7793_WriteRegister(uint8_t ui8address, uint32_t ui32data) {
 uint32_t AD7793_Scan(enMode mode, uint8_t ui8channel) {
    static uint32_t ui32result, ui32reg_value;
 
-   AD7793_Calibrate(ui8channel, CAL_INT_FULL_MODE);
+   if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {      
+      AD7793_Reset();
+      AD7793_WriteRegister(AD7793_REG_CONF, (AD7793_GAIN << 8) | AD7793_REFSEL | AD7793_BUF);
+      AD7793_WriteRegister(AD7793_REG_IO, 0x02);
+      
+      // AD7793_Calibrate(ui8channel, CAL_INT_FULL_MODE);
 
-   AD7793_SelectChannel(ui8channel); /* Select channel to scan */
+      AD7793_SelectChannel(ui8channel); /* Select channel to scan */
 
-   if (mode == SINGLE_CONV) { /* Check if single conversion mode is wanted */
+      if (mode == SINGLE_CONV) { /* Check if single conversion mode is wanted */
 
-      ui32reg_value = AD7793_ReadRegister(AD7793_REG_MODE);
+         ui32reg_value = AD7793_ReadRegister(AD7793_REG_MODE);
 
-      ui32reg_value &= AD7793_MODE_MSK;
+         ui32reg_value &= AD7793_MODE_MSK;
 
-      ui32reg_value |= (uint32_t)(mode << 13); /* Set single mode operation */
+         ui32reg_value |= (uint32_t)(mode << 13); /* Set single mode operation */
 
-      AD7793_CS_LOW;
+         AD7793_WriteRegister(AD7793_REG_MODE, ui32reg_value);
+      }
 
-      AD7793_WriteRegister(AD7793_REG_MODE, ui32reg_value);
+      if (mode == CONTINUOUS_CONV) {
+         AD7793_CS_LOW;
+      }
+
+      while ((AD7793_ReadRegister(AD7793_REG_STAT) & RDY_BIT) == RDY_BIT);
+
+      ui32result = AD7793_ReadRegister(AD7793_REG_DATA);
+
+      xSemaphoreGive(xSPIMutex);
    }
-
-   if (mode == CONTINUOUS_CONV) {
-      AD7793_CS_LOW;      
-   }
-
-   while ((AD7793_ReadRegister(AD7793_REG_STAT) & RDY_BIT) == RDY_BIT);  
-
-   ui32result = AD7793_ReadRegister(AD7793_REG_DATA);
-
-   AD7793_CS_HIGH;
 
    return ui32result;
 }
@@ -156,13 +159,9 @@ void AD7793_Calibrate(uint8_t ui8channel, enMode mode) {
 
    ui32reg_value |= (uint32_t)(mode << 13); /* Set mode */
 
-   AD7793_CS_LOW;
-
    AD7793_WriteRegister(AD7793_REG_MODE, ui32reg_value); /* Write MODE register */
 
-   while ((AD7793_ReadRegister(AD7793_REG_STAT)& RDY_BIT) == RDY_BIT) /* Wait until RDY bit from STATUS register is high */
-   
-   AD7793_CS_HIGH;
+   while ((AD7793_ReadRegister(AD7793_REG_STAT) & RDY_BIT) == RDY_BIT); /* Wait until RDY bit from STATUS register is high */
 }
 
 /**
@@ -178,7 +177,7 @@ float AD7793_ConvertToVolts(uint32_t u32adcValue) {
    // 0x800000 = 16.777.216 / 2 = 8.388.608 em decimal | 2^24 = 16.777.216
    // Vref = 1170 [mV]
 
-   int32_t i32adcValue = (int32_t)(u32adcValue - 0x800000); // Subtração com sinal
+   int32_t i32adcValue = (int32_t)(u32adcValue - 0x800000);  // Subtração com sinal
 
    f32voltage = ((float)i32adcValue * 1170) / (float)0x800000;
 

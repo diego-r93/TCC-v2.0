@@ -23,12 +23,15 @@ HydraulicPumpController::HydraulicPumpController(const char *pumperCode,
 
 void HydraulicPumpController::startPump() {
    if (!pumpState) {
-      pumpState = true;
       drvController.setMotorState(motorIndex, true);
-      drvController.apply();
-      timer.changePeriod(pulseDuration);
-      timer.start();
-      driveTimes.insert(String(millis()));
+      if (drvController.apply()) {
+         pumpState = true;
+         timer.changePeriod(pulseDuration);
+         timer.start();
+         driveTimes.insert(String(millis()));
+      } else {
+         printf("❌ Failed to apply SPI state\n");
+      }
    }
 }
 

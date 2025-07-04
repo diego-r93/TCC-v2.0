@@ -17,7 +17,7 @@ static inline uint8_t cmdByte(uint8_t addr, bool rd) {
    @brief Initializes SPI, reads DEVICE_ID + STATUS, clears faults if needed.
 **/
 bool DRV8243_Init(void) {
-   SPI_Init();
+   // SPI_Init();
 
    uint8_t id1, id0, st1, st0;
    bool ok = DRV8243_DaisyRead(DRV8243_REG_DEVICE_ID,

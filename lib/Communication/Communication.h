@@ -18,8 +18,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#define AD7793_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE3)  // 4 MHz clock, MSB first, mode 3
-#define DRV8243_CS_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE1) // 4 MHz clock, MSB first, mode 1
+#define AD7793_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE3)   // 4 MHz clock, MSB first, mode 3
+#define DRV8243_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE1)  // 4 MHz clock, MSB first, mode 1
+#define AD5683_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE2)   // 4 MHz clock, MSB first, mode 2
+#define AD7124_SPI_SETTINGS SPISettings(4000000, MSBFIRST, SPI_MODE3)   // 4 MHz clock, MSB first, mode 3
 
 // Pin mapping
 #define SCK_PIN 12
@@ -36,11 +38,21 @@
 #define DRV8243_CS_LOW digitalWrite(DRV8243_CS_PIN, LOW)
 #define DRV8243_CS_HIGH digitalWrite(DRV8243_CS_PIN, HIGH)
 
+#define AD5683_CS_PIN 9
+#define AD5683_CS_PIN_OUT pinMode(AD5683_CS_PIN, OUTPUT)
+#define AD5683_CS_LOW digitalWrite(AD5683_CS_PIN, LOW)
+#define AD5683_CS_HIGH digitalWrite(AD5683_CS_PIN, HIGH)
+
+#define AD7124_CS_PIN 10
+#define AD7124_CS_PIN_OUT pinMode(AD7124_CS_PIN, OUTPUT)
+#define AD7124_CS_LOW digitalWrite(AD7124_CS_PIN, LOW)
+#define AD7124_CS_HIGH digitalWrite(AD7124_CS_PIN, HIGH)
+
 #define SDO_PIN_IN pinMode(SDO_PIN, INPUT)
 #define GPIO1_STATE digitalRead(SDO_PIN)
 
 void SPI_Init(void);
-void    SPI_Write(uint8_t addr, uint32_t data, uint8_t nbytes);
+void SPI_Write(uint8_t addr, uint32_t data, uint8_t nbytes);
 uint32_t SPI_Read(uint8_t addr, uint8_t nbytes);
 void SPI_TransferFrame(const uint8_t *tx, uint8_t *rx, uint8_t len);
 

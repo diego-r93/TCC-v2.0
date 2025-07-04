@@ -37,11 +37,11 @@ Task                         Core  Prio                     Descrição
 --------------------------------------------------------------------------------------------------------------------------
 vTaskMqttLoop                 0     5     Loop dedicado ao client.loop() (subscribe, reconnect e callback) a cada 10 ms
 vTaskCheckWiFi                0     4     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
-vTaskMqttReconnect            0     4     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
+vTaskMqttReconnect            0     3     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
 vTaskMqttHandler              1     3     Trata as mensagens recebidas do MQTT e executa as ações correspondentes
 vTaskNTP                      0     1     Atualiza o horário com base no NTP
-vTaskUpdate                   1     4     Atualiza as informações através de um POST no MongoDB Atlas
-vTaskTurnOnPump               1     3     Liga a bomba quando chegar no seu horário de acionamento
+vTaskUpdate                   1     3     Atualiza as informações através de um POST no MongoDB Atlas
+vTaskTurnOnPump               1     4     Liga a bomba quando chegar no seu horário de acionamento
 vTaskds18b20SensorRead        1     1     Lê o sensor ds18b20
 vTaskds18b20DataProcess       1     2     Processa os dados do sensor de ds18b20 e envia para o servidor
 vTaskSHT35SensorRead          1     1     Lê o sensor SHT35
@@ -54,8 +54,9 @@ vTaskTdsDataProcess           1     2     Processa os dados do sensor de TDS e e
 */
 
 // Tasks delays
-#define UPDATE_DELAY 300000
-#define TURN_ON_PUMP_DELAY 100
+#define UPDATE_DELAY 10000      // 10 segundos
+#define UPDATE_TIMEOUT 3000     // 3 segundos
+#define TURN_ON_PUMP_DELAY 100  // 100 ms
 
 #define DS18B20_SENSOR_READ_DELAY 500
 #define DS18B20_DATA_PROCESS_DELAY 1000
@@ -83,9 +84,13 @@ HydraulicPumpController myPumps[] = {
 
 const int numPumps = sizeof(myPumps) / sizeof(myPumps[0]);
 
+// WiFi configuration
+#define CHECK_WIFI_DELAY 500  // 500 ms
+#define WIFI_TIMEOUT 5000     // 5 segundos
+
 // NTP configuration
-#define CHECK_WIFI_DELAY 500
-#define NTP_DELAY 1000
+#define NTP_DELAY 1000                      // 1 segundo
+#define NTP_TIMEOUT 3000                    // 3 segundos
 #define NTP_UPDATE_INTERVAL 15 * 60 * 1000  // 15 minutos
 
 WiFiUDP udp;
@@ -99,8 +104,9 @@ NTPClient ntp(udp, "a.st1.ntp.br", -3 * 3600, NTP_UPDATE_INTERVAL);
 // IPAddress subnet(255, 255, 255, 0);
 
 // MQTT configuration
-#define MQTT_LOOP_DELAY 10
-#define CHECK_MQTT_DELAY 500
+#define MQTT_LOOP_DELAY 10           // 10 ms
+#define CHECK_MQTT_DELAY 1000        // 1 segundo
+#define MQTT_RECONNECT_TIMEOUT 5000  // 5 segundos
 
 String mqtt_server = "192.168.0.100";
 const uint16_t mqtt_port = 1883;
@@ -278,26 +284,38 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    client.setCACert(root_ca);
 
    HTTPClient https;
+   https.setTimeout(5000);  // ⏳ Evita travar por muito tempo
 
-   https.begin(client, serverName);
+   bool beginOK = https.begin(client, serverName);
+
+   if (!beginOK) {
+      Serial.printf("❌ HTTPS begin() failed");
+      return;
+   }
+
    https.addHeader("apiKey", apiKey);
    https.addHeader("Content-Type", "application/json");
    https.addHeader("Accept", "application/json");
 
    int httpResponseCode = https.POST(json);
 
-   Serial.print("HTTP Response code: ");
-   Serial.println(httpResponseCode);
+   if (httpResponseCode <= 0) {
+      Serial.printf("❌ POST failed. Error code: %d\n", httpResponseCode);
+      https.end();  // Libera conexão
+      return;
+   } else {
+      Serial.printf("✅ POST successful. Response code: %d\n", httpResponseCode);
+   }
 
    String payload = https.getString();
-
-   // Disconnect
    https.end();
 
    DeserializationError error = deserializeJson(response, payload);
 
-   if (error)
-      Serial.println("Failed to read document, using default configuration");
+   if (error) {
+      Serial.printf("❌ Failed to parse JSON response.");
+      return;
+   }
 
    // serializeJsonPretty(response["document"], Serial);
 
@@ -324,7 +342,7 @@ void saveDriveTimes(const std::set<String>& driveTimes, const String& filename) 
    File file = SPIFFS.open(filename, FILE_WRITE);
 
    if (!file) {
-      Serial.println("Failed to open file for writing");
+      Serial.println("❌ Failed to open file for writing");
       return;
    }
 
@@ -334,13 +352,13 @@ void saveDriveTimes(const std::set<String>& driveTimes, const String& filename) 
    }
 
    file.close();
-   Serial.println("Drive times saved successfully");
+   Serial.println("✅ Drive times saved successfully");
 }
 
 void loadDriveTimes(std::set<String>& driveTimes, const String& filename) {
    File file = SPIFFS.open(filename, FILE_READ);
    if (!file) {
-      Serial.println("Failed to open file for reading");
+      Serial.println("❌ Failed to open file for reading");
       return;
    }
 
@@ -354,14 +372,14 @@ void loadDriveTimes(std::set<String>& driveTimes, const String& filename) {
    }
 
    file.close();
-   Serial.println("Drive times loaded successfully");
+   Serial.println("✅ Drive times loaded successfully");
 }
 
 void initSPIFFS() {
    if (!SPIFFS.begin(true)) {
-      Serial.println("An error has occurred while mounting SPIFFS");
+      Serial.println("❌ An error has occurred while mounting SPIFFS");
    }
-   Serial.println("SPIFFS mounted successfully");
+   Serial.println("✅ SPIFFS mounted successfully");
 }
 
 void initWiFi() {
@@ -414,6 +432,10 @@ void initMqtt() {
    client.setServer(mqtt_server.c_str(), mqtt_port);
    client.setCallback(mqttCallback);
    client.setBufferSize(2048);
+
+   // Configure connection timeouts and keep-alive before connecting
+   // client.setSocketTimeout(3);  // Maximum blocking time in seconds
+   // client.setKeepAlive(30);     // Interval in seconds for PINGREQ to broker
 
    const char* clientId = WiFi.getHostname();
    const char* user = "diego";
@@ -529,21 +551,15 @@ void initDRV8243Configuration() {
 }
 
 void initRtos() {
-   xWifiMutex = xSemaphoreCreateMutex();
-   xSPIMutex = xSemaphoreCreateMutex();
-   xPIDControllerMutex = xSemaphoreCreateMutex();
-
-   xMqttQueue = xQueueCreate(MQTT_QUEUE_LENGTH, sizeof(MqttMessage));
-
-   xTaskCreatePinnedToCore(vTaskCheckWiFi, "taskCheckWiFi", configMINIMAL_STACK_SIZE + 1024, NULL, 4, &CheckWiFiTaskHandle, PRO_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskCheckWiFi, "taskCheckWiFi", configMINIMAL_STACK_SIZE + 4096, NULL, 4, &CheckWiFiTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskMqttLoop, "taskMqttLoop", configMINIMAL_STACK_SIZE + 2048, NULL, 5, &MqttLoopTaskHandle, PRO_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 2048, NULL, 4, &MqttReconnectTaskHandle, PRO_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 2048, NULL, 3, &MqttReconnectTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskMqttHandler, "taskMqttHandler", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &TaskMqttHandlerHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskNTP, "taskNTP", configMINIMAL_STACK_SIZE + 2048, NULL, 1, &NTPTaskHandle, PRO_CPU_NUM);
 
    for (int indice = 0; indice < numPumps; indice++) {
       xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &myPumps[indice], 3, &UpdateTaskHandle, APP_CPU_NUM);
-      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &myPumps[indice], 3, &TurnOnPumpTaskHandle, APP_CPU_NUM);
+      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &myPumps[indice], 4, &TurnOnPumpTaskHandle, APP_CPU_NUM);
    }
 
    xTaskCreatePinnedToCore(vTaskds18b20SensorRead, "taskds18b20SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &ds18b20SensorReadTaskHandle, APP_CPU_NUM);
@@ -552,8 +568,8 @@ void initRtos() {
    xTaskCreatePinnedToCore(vTaskSHT35SensorRead, "taskSHT35SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &SHT35SensorReadTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskSHT35DataProcess, "taskSHT35DataProcess", configMINIMAL_STACK_SIZE + 4096, NULL, 2, &SHT35DataProcessTaskHandle, APP_CPU_NUM);
 
-   // xTaskCreatePinnedToCore(vTaskPhSensorRead, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
-   // xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskPhSensorRead, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
 
    xTaskCreatePinnedToCore(vTaskTdsSensorRead, "TDS Meter Task", 4096, NULL, 1, &TdsSensorReadTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskTdsDataProcess, "TDS Data Process Task", 4096, NULL, 2, &TdsDataProcessTaskHandle, APP_CPU_NUM);
@@ -618,12 +634,25 @@ void setup() {
    initNTP();
    initMqtt();
 
-   initDRV8243Configuration();
+   xSPIMutex = xSemaphoreCreateMutex();
+   configASSERT(xSPIMutex);
+
+   xWifiMutex = xSemaphoreCreateMutex();
+   configASSERT(xWifiMutex);
+
+   xPIDControllerMutex = xSemaphoreCreateMutex();
+   configASSERT(xPIDControllerMutex);
+
+   xMqttQueue = xQueueCreate(MQTT_QUEUE_LENGTH, sizeof(MqttMessage));
+   configASSERT(xMqttQueue);
+
    initDS3234();
    initSHT35();
-   initTdsSensor();
-   // initPhSensor();
    initds18b20Sensor();
+
+   initDRV8243Configuration();
+   initTdsSensor();
+   initPhSensor();
 
    initServer();
    initRtos();
@@ -645,14 +674,43 @@ void loop() {
 }
 
 void vTaskCheckWiFi(void* pvParameters) {
+   static int wifiFailCount = 0;
+
    while (1) {
       if (WiFi.status() != WL_CONNECTED) {
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-            Serial.println("Reconnecting to WiFi...");
-            WiFi.disconnect();
-            WiFi.reconnect();
+         wifiFailCount++;
+         printf("❌ WiFi failure count: %d\n", wifiFailCount);
+
+         if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(WIFI_TIMEOUT))) {
+            printf("🔐 WiFi mutex acquired in vTaskCheckWiFi.\n");
+            printf("⚠️ WiFi disconnected. Reconnecting to WiFi...\n");
+
+            WiFi.disconnect(true, false);     // disconnect and erase credentials
+            WiFi.mode(WIFI_OFF);              // turn off WiFi interface
+            vTaskDelay(pdMS_TO_TICKS(1000));  // wait for proper shutdown
+
+            WiFi.mode(WIFI_STA);         // switch back to station mode
+            WiFi.begin(ssid, password);  // attempt to reconnect
+            printf("🔁 WiFi.begin called after reset.\n");
+
             xSemaphoreGive(xWifiMutex);
+            printf("🔓 WiFi mutex released after vTaskCheckWiFi.\n");
+         } else {
+            printf("⚠️ Timeout while trying to acquire xWifiMutex in vTaskCheckWiFi\n");
          }
+
+         // If reconnection fails repeatedly, restart the ESP
+         if (wifiFailCount >= 10) {
+            printf("🚨 Persistent WiFi failure. Restarting ESP...\n");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            ESP.restart();
+         }
+
+      } else {
+         if (wifiFailCount > 0) {
+            printf("✅ WiFi reconnected successfully.\n");
+         }
+         wifiFailCount = 0;
       }
 
       vTaskDelay(pdMS_TO_TICKS(CHECK_WIFI_DELAY));
@@ -661,8 +719,9 @@ void vTaskCheckWiFi(void* pvParameters) {
 
 void vTaskNTP(void* pvParameters) {
    while (1) {
-      if (ntp.update()) {
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
+      if ((WiFi.status() == WL_CONNECTED) && ntp.update()) {
+         if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(NTP_TIMEOUT))) {
+            printf("🔐 WiFi mutex acquired for NTP update.\n");
             unsigned long epochTime = ntp.getEpochTime();
             RtcDateTime newTime = convertEpochToDateTime(epochTime);
 
@@ -677,8 +736,11 @@ void vTaskNTP(void* pvParameters) {
 
             // escreve no DS3234
             Rtc.SetDateTime(newTime);
-            printf("Time updated from NTP: %s\n", getDateTime(newTime).c_str());
+            printf("✅ Time updated from NTP: %s\n", getDateTime(newTime).c_str());
             xSemaphoreGive(xWifiMutex);
+            printf("🔓 WiFi mutex released after NTP update.\n");
+         } else {
+            Serial.println("⚠️ Timeout while trying to acquire xWifiMutex in vTaskNTP\n");
          }
       }
 
@@ -714,27 +776,37 @@ void vTaskMqttReconnect(void* parameter) {
    const char* password = "D1993rS*";
 
    while (1) {
-      // Se já estiver conectado, nada a fazer aqui
       if (client.connected()) {
          vTaskDelay(pdMS_TO_TICKS(CHECK_MQTT_DELAY));
          continue;
       } else {
-         Serial.println("MQTT client not connected, attempting to reconnect...");
+         Serial.println("⚠️ MQTT client not connected, attempting to reconnect...\n");
 
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY) == pdTRUE) {
-            client.disconnect();
+         if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("✅ WiFi is connected, trying to reconnect MQTT client...\n");
 
-            if (client.connect(clientId, user, password)) {
-               printf("Reconnected as '%s'. Subscribing...\n", clientId);
-               String outTopic = String(clientId) + "/output";
-               client.subscribe(outTopic.c_str());
-               client.subscribe("getdevices");
-               printf("Subscriptions done.\n");
+            if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(MQTT_RECONNECT_TIMEOUT))) {
+               Serial.printf("🔐 WiFi mutex acquired for MQTT Reconnect.\n");
+               client.disconnect();         // Clean any stale session
+               xSemaphoreGive(xWifiMutex);  // Immediately release the mutex
+               Serial.printf("🔓 WiFi mutex released after disconnect.\n");
+
+               if (client.connect(clientId, user, password)) {
+                  printf("✅ Reconnected as '%s'. Subscribing...\n", clientId);
+                  String outTopic = String(clientId) + "/output";
+                  client.subscribe(outTopic.c_str());
+                  client.subscribe("getdevices");
+                  printf("✅ Subscriptions done.\n");
+               } else {
+                  printf("⚠️ Reconnect failed (state=%d). Will retry.\n", client.state());
+               }
+
+               // xSemaphoreGive(xWifiMutex);
             } else {
-               printf("Reconnect failed (state=%d). Will retry.\n", client.state());
+               Serial.println("⚠️ Timeout while trying to acquire xWifiMutex in vTaskMqttReconnect\n");
             }
-
-            xSemaphoreGive(xWifiMutex);
+         } else {
+            Serial.println("⚠️ WiFi is not connected, skipping MQTT reconnect.\n");
          }
       }
 
@@ -783,14 +855,10 @@ void vTaskMqttHandler(void* pvParameters) {
 
                   printf("Changing motor %s to %s\n", key.c_str(), state ? "on" : "off");
 
-                  // Protege o barramento SPI ao falar com o pumpController
-                  if (xSemaphoreTake(xSPIMutex, portMAX_DELAY) == pdTRUE) {
-                     if (state)
-                        myPumps[indice].startPump();
-                     else
-                        myPumps[indice].stopPump();
-                     xSemaphoreGive(xSPIMutex);
-                  }
+                  if (state)
+                     myPumps[indice].startPump();
+                  else
+                     myPumps[indice].stopPump();
                }
             }
             printf("Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n",
@@ -827,8 +895,10 @@ void vTaskMqttHandler(void* pvParameters) {
                }
             }
 
+            String jsonTopic = String("devices/") + String(WiFi.getHostname());
             String jsonStr;
             serializeJson(jsonPayload, jsonStr);
+            // client.publish(jsonTopic.c_str(), jsonStr.c_str());
             client.publish("devices", jsonStr.c_str());
          }
       }
@@ -841,16 +911,21 @@ void vTaskUpdate(void* pvParameters) {
 
    while (1) {
       if (WiFi.status() == WL_CONNECTED) {
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
+         if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(UPDATE_TIMEOUT))) {
+            Serial.printf("🔐 WiFi mutex acquired for update.\n");
+
             loadConfigurationCloud(pump->getCode(), pump->getJsonDataPointer());
             updateConfiguration(pump->getJsonData(), pump->getDriveTimesPointer(), pump->pulseDurationPointer);
 
-            // Salvar os driveTimes atualizados apenas se houver conexão
-            saveDriveTimes(*(pump->getDriveTimesPointer()), "/driveTimes.bin");
             xSemaphoreGive(xWifiMutex);
+            Serial.printf("🔓 WiFi mutex released after update.\n");
+
+            saveDriveTimes(*(pump->getDriveTimesPointer()), "/driveTimes.bin");
+         } else {
+            Serial.printf("⚠️ Timeout while trying to acquire xWifiMutex in vTaskUpdate.\n");
          }
       } else {
-         printf("No internet connection, using stored drive times.");
+         Serial.printf("⚠️ No internet connection, using stored drive times.\n");
       }
 
       vTaskDelay(pdMS_TO_TICKS(UPDATE_DELAY));
@@ -861,16 +936,17 @@ void vTaskTurnOnPump(void* pvParameters) {
    HydraulicPumpController* pump = (HydraulicPumpController*)pvParameters;
 
    while (1) {
-      RtcDateTime now = Rtc.GetDateTime();        // Pegando o tempo do RTC
-      String currentDateTime = getDateTime(now);  // Formatando o tempo obtido
+      RtcDateTime now = Rtc.GetDateTime();
 
-      if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
-         for (String driveTime : pump->getDriveTimes()) {
-            if (currentDateTime == driveTime) {  // Comparando com os horários de acionamento
-               pump->startPump();
-            }
+      char timeBuffer[9];  // "HH:MM:SS" + null terminator
+      snprintf(timeBuffer, sizeof(timeBuffer), "%02u:%02u:%02u", now.Hour(), now.Minute(), now.Second());
+      String formattedTime(timeBuffer);
+
+      for (String driveTime : pump->getDriveTimes()) {
+         if (formattedTime == driveTime && !pump->getPumpState()) {
+            printf("🔔 Time to turn on pump %s at %s\n", pump->getCode(), driveTime.c_str());
+            pump->startPump();
          }
-         xSemaphoreGive(xSPIMutex);
       }
       vTaskDelay(pdMS_TO_TICKS(TURN_ON_PUMP_DELAY));
    }
@@ -906,7 +982,7 @@ void vTaskds18b20DataProcess(void* pvParameters) {
             }
          }
       } else {
-         printf("No internet connection, skipping data processing.");
+         printf("❌ No internet connection, skipping data processing.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(DS18B20_DATA_PROCESS_DELAY));
@@ -916,7 +992,7 @@ void vTaskds18b20DataProcess(void* pvParameters) {
 void vTaskSHT35SensorRead(void* pvParameters) {
    while (1) {
       if (!gSht3x.getTemperatureHumidity(sht35Data)) {
-         Serial.println("Não foi possível ler os dados do sensor SHT35");
+         Serial.println("❌ Failed to read SHT35 data, retrying...");
       }
       vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
    }
@@ -946,7 +1022,7 @@ void vTaskSHT35DataProcess(void* pvParameters) {
             }
          }
       } else {
-         printf("No internet connection, skipping data processing.");
+         printf("❌ No internet connection, skipping data processing.\n");
       }
 
       vTaskDelay(pdMS_TO_TICKS(SHT35_DATA_PROCESS_DELAY));
@@ -956,40 +1032,37 @@ void vTaskSHT35DataProcess(void* pvParameters) {
 void vTaskPhSensorRead(void* pvParameters) {
    float ph, temp, internalTemp, AVDD;
    while (1) {
+      AVDD = CN0326_CalculateAVDD();
+      internalTemp = CN0326_CalculateInternalTemp();
+      temp = CN0326_CalculateTemp();
+      ph = CN0326_CalculatePH();
+
       if (WiFi.status() == WL_CONNECTED) {
-         if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
-            AVDD = CN0326_CalculateAVDD();
-            internalTemp = CN0326_CalculateInternalTemp();
-            temp = CN0326_CalculateTemp();
-            ph = CN0326_CalculatePH();
-            xSemaphoreGive(xSPIMutex);
+         String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/ph";
+         String phPayload = String(ph);
 
-            String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/ph";
-            String phPayload = String(ph);
+         String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/temperature";
+         String tempPayload = String(temp);
 
-            String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/temperature";
-            String tempPayload = String(temp);
+         String internalTempTopic = String("sensors/") + String(WiFi.getHostname()) + "/internalTemperature";
+         String internalTempPayload = String(internalTemp);
 
-            String internalTempTopic = String("sensors/") + String(WiFi.getHostname()) + "/internalTemperature";
-            String internalTempPayload = String(internalTemp);
+         String avddTopic = String("sensors/") + String(WiFi.getHostname()) + "/avdd";
+         String avddPayload = String(AVDD);
 
-            String avddTopic = String("sensors/") + String(WiFi.getHostname()) + "/avdd";
-            String avddPayload = String(AVDD);
-
-            if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-               if (client.connected()) {
-                  client.publish(phTopic.c_str(), phPayload.c_str());
-                  client.publish(tempTopic.c_str(), tempPayload.c_str());
-                  client.publish(internalTempTopic.c_str(), internalTempPayload.c_str());
-                  client.publish(avddTopic.c_str(), avddPayload.c_str());
-                  xSemaphoreGive(xWifiMutex);
-               } else {
-                  printf("❌ MQTT client not connected, cannot publish pH data.\n");
-               }
+         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
+            if (client.connected()) {
+               client.publish(phTopic.c_str(), phPayload.c_str());
+               client.publish(tempTopic.c_str(), tempPayload.c_str());
+               client.publish(internalTempTopic.c_str(), internalTempPayload.c_str());
+               client.publish(avddTopic.c_str(), avddPayload.c_str());
+               xSemaphoreGive(xWifiMutex);
+            } else {
+               printf("❌ MQTT client not connected, cannot publish pH data.\n");
             }
          }
       } else {
-         printf("No internet connection, skipping data processing.");
+         printf("❌ No internet connection, skipping data processing.\n");
       }
 
       vTaskDelay(pdMS_TO_TICKS(PH_SENSOR_READ_DELAY));

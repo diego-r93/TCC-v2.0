@@ -1,13 +1,26 @@
 #include "Communication.h"
 
+#include "freertos/semphr.h"
+extern SemaphoreHandle_t xSPIMutex;
+
 void SPI_Init(void) {
    SPI.begin();
 
+   // DRV8243 CS
    DRV8243_CS_PIN_OUT;
    DRV8243_CS_HIGH;
 
-   DRV8243_CS_PIN_OUT;
-   DRV8243_CS_HIGH;
+   // AD7793 CS
+   AD7793_CS_PIN_OUT;
+   AD7793_CS_HIGH;
+
+   // AD5683 CS
+   AD5683_CS_PIN_OUT;
+   AD5683_CS_HIGH;
+
+   // AD7124 CS
+   AD7124_CS_PIN_OUT;
+   AD7124_CS_HIGH;
 
    SDO_PIN_IN;
 
@@ -27,7 +40,7 @@ void SPI_Init(void) {
 void SPI_Write(uint8_t ui8address, uint32_t ui32data, uint8_t ui8bytes) {
    uint8_t ui8counter, ui8write[ui8bytes];
 
-   DRV8243_CS_LOW;
+   AD7793_CS_LOW;
    SPI.beginTransaction(AD7793_SPI_SETTINGS);
 
    if (ui8bytes != 4) {
@@ -49,7 +62,7 @@ void SPI_Write(uint8_t ui8address, uint32_t ui32data, uint8_t ui8bytes) {
    }
 
    SPI.endTransaction();
-   DRV8243_CS_HIGH;
+   AD7793_CS_HIGH;
 }
 
 /**
@@ -64,7 +77,7 @@ void SPI_Write(uint8_t ui8address, uint32_t ui32data, uint8_t ui8bytes) {
 uint32_t SPI_Read(uint8_t ui8address, uint8_t ui8bytes) {
    uint32_t ui32AdcCodes = 0;
 
-   DRV8243_CS_LOW;
+   AD7793_CS_LOW;
    SPI.beginTransaction(AD7793_SPI_SETTINGS);
 
    /*  Send read command */
@@ -76,7 +89,7 @@ uint32_t SPI_Read(uint8_t ui8address, uint8_t ui8bytes) {
    }
 
    SPI.endTransaction();
-   DRV8243_CS_HIGH;
+   AD7793_CS_HIGH;
 
    return ui32AdcCodes;
 }
@@ -89,12 +102,14 @@ uint32_t SPI_Read(uint8_t ui8address, uint8_t ui8bytes) {
  @param len  Number of bytes to shift.
 
 **/
-void SPI_TransferFrame(const uint8_t *tx, uint8_t *rx, uint8_t len)
-{
-    DRV8243_CS_LOW;
-    SPI.beginTransaction(DRV8243_CS_SPI_SETTINGS);
-    for (uint8_t i = 0; i < len; ++i)
-        rx ? rx[i] = SPI.transfer(tx[i]) : SPI.transfer(tx[i]);
-    SPI.endTransaction();
-    DRV8243_CS_HIGH;
+void SPI_TransferFrame(const uint8_t *tx, uint8_t *rx, uint8_t len) {
+   if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
+      DRV8243_CS_LOW;
+      SPI.beginTransaction(DRV8243_SPI_SETTINGS);
+      for (uint8_t i = 0; i < len; ++i)
+         rx ? rx[i] = SPI.transfer(tx[i]) : SPI.transfer(tx[i]);
+      SPI.endTransaction();
+      DRV8243_CS_HIGH;
+      xSemaphoreGive(xSPIMutex);
+   }
 }
