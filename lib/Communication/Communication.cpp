@@ -108,9 +108,6 @@ int32_t SPI_Read_Buffer(uint8_t ui8_slave_id, uint8_t ui8_buffer[],
                         uint8_t ui8_nr_bytes) {
    int32_t ret = 0;
 
-   DRV8243_CS_HIGH;
-   AD7793_CS_HIGH;
-
    /*Clear Slave based on ID */
 
    switch (ui8_slave_id) {

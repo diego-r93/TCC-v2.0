@@ -66,6 +66,7 @@
 #define ADC_CH3 3
 #define ADC_CH4 4
 #define ADC_CH5 5
+#define ADC_CH6 6
 #define ADC_CONTINUOUS_CONV 1
 #define ADC_SINGLE_CONV 2
 #define ADC_CH_RDY_MSK 0x8F
@@ -121,6 +122,7 @@
 #define RTD_REF_RES 4020
 #define RTD_RES_100 100
 #define RTD_RES_1K 1000
+#define PTC_REF_RES 10000
 #define TCAL 25
 #define CELL_CONST_LOW 0.1
 #define CELL_CONST_NORMAL 1

@@ -69,9 +69,9 @@ vTaskECDataProcess            1     2     Processa os dados do sensor de conduti
 #define PH_DATA_PROCESS_DELAY 5000
 #define PH_MOTOR_CONTROL_DELAY 500
 
-#define TDS_SENSOR_READ_DELAY 10000
-#define TDS_DATA_PROCESS_DELAY 10000
-#define TDS_MOTOR_CONTROL_DELAY 500
+#define EC_SENSOR_READ_DELAY 5000
+#define EC_DATA_PROCESS_DELAY 5000
+#define EC_MOTOR_CONTROL_DELAY 500
 
 struct cn0411_init_params cn0411_init_params = {
     CH_GAIN_RES_20M,
@@ -1116,76 +1116,79 @@ void vTaskPhDataProcess(void* pvParameters) {
    }
 }
 
-// void vTaskECSensorRead(void* pvParameters) {
-//    static float dac_voltage = 0.0;
-//    static bool ascending = true;
-
-//    while (1) {
-//       if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
-//          printf("🔐 SPIMutex acquired in vTaskECSensorRead.\n");
-//          // Escreve no DAC
-//          CN0411_DAC_set_value(&cn0411_dev, dac_voltage);
-
-//          // Lê a tensão atual no DAC via ADC (canal 3)
-//          if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
-//             printf("[ERRO] Falha ao ler a tensão do DAC.\n");
-//          } else {
-//             printf("Tensão DAC escrita: %.2f V | Tensão DAC lida: %.5f V\n",
-//                    dac_voltage, cn0411_dev.read_dac);
-//          }
-
-//          xSemaphoreGive(xSPIMutex);
-//          printf("🔓 SPIMutex released after vTaskECSensorRead.\n");
-//       } else {
-//          printf("⚠️ Timeout while trying to acquire xSPIMutex in vTaskECSensorRead\n");
-//       }
-
-//       // Atualiza tensão do DAC
-//       if (ascending) {
-//          dac_voltage += 0.1;
-//          if (dac_voltage >= 2.0) {
-//             dac_voltage = 2.0;
-//             ascending = false;
-//          }
-//       } else {
-//          dac_voltage -= 0.1;
-//          if (dac_voltage <= 0.0) {
-//             dac_voltage = 0.0;
-//             ascending = true;
-//          }
-//       }
-
-//       vTaskDelay(pdMS_TO_TICKS(2000));  // Espera 2 segundos
-//    }
-// }
-
 void vTaskECSensorRead(void* pvParameters) {
-   // Define tensão DAC
-   CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
+   static float dac_voltage = 0.0;
+   static bool ascending = true;
 
-   // Define resistor de ganho
-   CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
+   while (1) {
+      if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
+         printf("🔐 SPIMutex acquired in vTaskECSensorRead.\n");
+         // Escreve no DAC
+         CN0411_DAC_set_value(&cn0411_dev, dac_voltage);
 
-   // Define frequência PWM e duty cycle
-   CN0411_pwm_freq(PWM_FREQ_94, 50);
+         // Lê a tensão atual no DAC via ADC (canal 3)
+         if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
+            printf("[ERRO] Falha ao ler a tensão do DAC.\n");
+         } else {
+            printf("Tensão DAC escrita: %.2f V | Tensão DAC lida: %.5f V\n",
+                   dac_voltage, cn0411_dev.read_dac);
+         }
 
-   // Laço principal da task
-   while (true) {
-      // PWM principal com 50% duty
-      digitalWrite(PWM_MAIN_PIN, HIGH);
-      digitalWrite(PWM_POS_PIN, HIGH);
-      digitalWrite(PWM_NEG_PIN, LOW);
-      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+         CN0411_read_temp(&cn0411_dev);
+         printf("Temperatura lida: %.2f °C\n", cn0411_dev.temp);
 
-      digitalWrite(PWM_MAIN_PIN, LOW);
-      digitalWrite(PWM_POS_PIN, LOW);
-      digitalWrite(PWM_NEG_PIN, HIGH);
-      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+         xSemaphoreGive(xSPIMutex);
+         printf("🔓 SPIMutex released after vTaskECSensorRead.\n");
+      } else {
+         printf("⚠️ Timeout while trying to acquire xSPIMutex in vTaskECSensorRead\n");
+      }
+
+      // Atualiza tensão do DAC
+      if (ascending) {
+         dac_voltage += 0.1;
+         if (dac_voltage >= 2.0) {
+            dac_voltage = 2.0;
+            ascending = false;
+         }
+      } else {
+         dac_voltage -= 0.1;
+         if (dac_voltage <= 0.0) {
+            dac_voltage = 0.0;
+            ascending = true;
+         }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(2000));  // Espera 2 segundos
    }
 }
 
+// void vTaskECSensorRead(void* pvParameters) {
+//    // Define tensão DAC
+//    CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
+
+//    // Define resistor de ganho
+//    CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
+
+//    // Define frequência PWM e duty cycle
+//    CN0411_pwm_freq(PWM_FREQ_94, 50);
+
+//    // Laço principal da task
+//    while (true) {
+//       // PWM principal com 50% duty
+//       digitalWrite(PWM_MAIN_PIN, HIGH);
+//       digitalWrite(PWM_POS_PIN, HIGH);
+//       digitalWrite(PWM_NEG_PIN, LOW);
+//       vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+
+//       digitalWrite(PWM_MAIN_PIN, LOW);
+//       digitalWrite(PWM_POS_PIN, LOW);
+//       digitalWrite(PWM_NEG_PIN, HIGH);
+//       vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+//    }
+// }
+
 void vTaskECDataProcess(void* pvParameters) {
    while (1) {
-      vTaskDelay(pdMS_TO_TICKS(TDS_DATA_PROCESS_DELAY));
+      vTaskDelay(pdMS_TO_TICKS(EC_DATA_PROCESS_DELAY));
    }
 }

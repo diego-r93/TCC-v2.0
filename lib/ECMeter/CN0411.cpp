@@ -51,6 +51,7 @@
 
 #include "AD7124_regs.h"
 #include "Communication.h"
+#include "Timer.h"
 
 /******************************************************************************/
 /*************************** Variable Definitions *****************************/
@@ -188,6 +189,11 @@ int32_t CN0411_ADC_set_ch(struct cn0411_device *cn0411_dev, uint8_t channel,
                  AD7124_CH_MAP_REG_AINP(11) | AD7124_CH_MAP_REG_AINM(17));
          cn0411_dev->ad7124_dev.regs[AD7124_Channel_5].value = mask;
          break;
+      case ADC_CH6:
+         mask = (ADC_SET_CH(ch_en) | AD7124_CH_MAP_REG_SETUP(1) |
+                 AD7124_CH_MAP_REG_AINP(12) | AD7124_CH_MAP_REG_AINM(13));
+         cn0411_dev->ad7124_dev.regs[AD7124_Channel_6].value = mask;
+         break;
       default:
          return CN0411_FAILURE;
    }
@@ -299,7 +305,7 @@ int32_t CN0411_ADC_read_ch(struct cn0411_device *cn0411_dev, uint8_t ch) {
 
             status_reg = cn0411_dev->ad7124_dev.regs[AD7124_Status].value &
                          ADC_CH_RDY_MSK;
-            // timer_sleep_5uS(1u);
+            timer_sleep_5uS(1u);
          } while ((status_reg == ch) && (--timeout));
 
          if (timeout == 0)
@@ -314,7 +320,7 @@ int32_t CN0411_ADC_read_ch(struct cn0411_device *cn0411_dev, uint8_t ch) {
 
             status_reg = cn0411_dev->ad7124_dev.regs[AD7124_Status].value &
                          ADC_CH_RDY_MSK;
-            // timer_sleep_5uS(1u);
+            timer_sleep_5uS(1u);
          } while (status_reg != ch && (--timeout));
 
          if (timeout == 0)
@@ -358,30 +364,53 @@ int32_t CN0411_ADC_read_ch(struct cn0411_device *cn0411_dev, uint8_t ch) {
 }
 
 /**
- * CN0411 read temperature
+ * CN0411 read NTC temperature
  *
- * Reads channel 0 of the ADC
+ * Reads channel 7 of the ADC, calculates the resistance, and then
+ * determines the temperature using the Steinhart-Hart equation.
+ *
+ * Steinhart-Hart equation:
+ * 1/T = A + B * ln(R) + C * (ln(R))^3
+ * Where:
+ * - T is the temperature in Kelvin
+ * - R is the resistance of the NTC thermistor
+ * - SH_A, SH_B, and SH_C are Steinhart-Hart coefficients (dependent on the NTC model)
  *
  * @param cn0411_dev - The device structure.
  * @return 0 in case of success, negative error code otherwise.
  */
 int32_t CN0411_read_temp(struct cn0411_device *cn0411_dev) {
    int32_t ret;
-   uint32_t ch0_data;
+   uint32_t ch6_data;
 
-   ret = CN0411_ADC_read_ch(cn0411_dev, ADC_CH0);
+   ret = CN0411_ADC_read_ch(cn0411_dev, ADC_CH6);
    if (ret == CN0411_FAILURE)
       return ret;
 
-   ch0_data = cn0411_dev->ad7124_dev.regs[AD7124_Data].value;
+   ch6_data = cn0411_dev->ad7124_dev.regs[AD7124_Data].value;
 
-   float resistance = (float)(ch0_data)*RTD_REF_RES / 0xFFFFFF;
-   if (resistance < cn0411_dev->rtd_res)
-      /* temp_rtd = a0+a1*r+a2*r^2+a3*r^3+a4*r^4+a5*r^5 */
-      cn0411_dev->temp = -242.02 + 2.228 * resistance + (2.5859 * pow(10, -3)) * pow(resistance, 2) - (48260.0 * pow(10, -6)) * pow(resistance, 3) - (2.8183 * pow(10, -3)) * pow(resistance, 4) + (1.5243 * pow(10, -10)) * pow(resistance, 5);
-   else
-      /* temp_rtd = (-A + sqrt(A^2 - 4 * B (1 - r / R0)) / (2 * B) */
-      cn0411_dev->temp = (-A_CONST + sqrt((pow(A_CONST, 2) - 4 * B_CONST * (1 - resistance / cn0411_dev->rtd_res)))) / (2 * B_CONST);
+   // Converte a leitura do ADC para tensão (em V)
+   float v_r = VREF - (float)(ch6_data)*VREF / 0xFFFFFF;
+
+   // Calcula corrente total no divisor
+   float current = v_r / PTC_REF_RES;
+
+   // Calcula a tensão sobre o NTC (diferença de potencial até VREF)
+   // float v_ntc = VREF - v_r;
+   float v_ntc = (float)(ch6_data)*VREF / 0xFFFFFF;
+
+   // Calcula a resistência do NTC
+   float resistance = v_ntc / current;
+
+   /* Steinhart-Hart coefficients for the specific NTC */
+   const float SH_A = 1.009249522e-03;
+   const float SH_B = 2.378405444e-04;
+   const float SH_C = 2.019202697e-07;
+
+   /* Compute temperature using Steinhart-Hart equation */
+   float log_r = log(resistance);
+   cn0411_dev->temp = 1.0 / (SH_A + (SH_B * log_r) + (SH_C * log_r * log_r * log_r));
+   cn0411_dev->temp -= 273.15;  // Convert from Kelvin to Celsius
 
    return ret;
 }
@@ -610,7 +639,7 @@ int32_t CN0411_ADC_int_calibrate(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_set_ch(cn0411_dev, ADC_CH0, ADC_CH_DISABLE);
    if (ret == CN0411_FAILURE)
       return ret;
@@ -623,7 +652,7 @@ int32_t CN0411_ADC_int_calibrate(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_set_ch(cn0411_dev, ADC_CH1, ADC_CH_DISABLE);
    if (ret == CN0411_FAILURE)
       return ret;
@@ -636,7 +665,7 @@ int32_t CN0411_ADC_int_calibrate(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_set_ch(cn0411_dev, ADC_CH2, ADC_CH_DISABLE);
 
    return ret;
@@ -665,12 +694,12 @@ int32_t CN0411_ADC_sys_calibrate(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_operation_mode(cn0411_dev, AD7124_CAL_SYS_ZERO_MODE);
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_set_ch(cn0411_dev, ADC_CH1, ADC_CH_DISABLE);
    if (ret == CN0411_FAILURE)
       return ret;
@@ -680,12 +709,12 @@ int32_t CN0411_ADC_sys_calibrate(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_operation_mode(cn0411_dev, AD7124_CAL_SYS_ZERO_MODE);
    if (ret == CN0411_FAILURE)
       return ret;
 
-   // timer_sleep(1000u);
+   timer_sleep(1000u);
    ret = CN0411_ADC_set_ch(cn0411_dev, ADC_CH2, ADC_CH_DISABLE);
    if (ret == CN0411_FAILURE)
       return ret;
