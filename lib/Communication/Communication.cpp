@@ -4,8 +4,6 @@
 extern SemaphoreHandle_t xSPIMutex;
 
 void SPI_Init(void) {
-   SPI.begin();
-
    // DRV8243 CS
    DRV8243_CS_PIN_OUT;
    DRV8243_CS_HIGH;
@@ -23,6 +21,8 @@ void SPI_Init(void) {
    AD7124_CS_HIGH;
 
    SDO_PIN_IN;
+
+   SPI.begin();
 
    Serial.println("[SPI INIT] SPI configurado e iniciado");
 }

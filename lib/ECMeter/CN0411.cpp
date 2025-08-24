@@ -736,36 +736,36 @@ int32_t CN0411_ADC_sys_calibrate(struct cn0411_device *cn0411_dev) {
 int32_t CN0411_premeasurement(struct cn0411_device *cn0411_dev) {
    int32_t ret;
 
-   cn0411_dev->ch_gain = CH_GAIN_RES_20M;
-   ret = CN0411_read_vdac(cn0411_dev);
-   if (ret == CN0411_FAILURE)
-      return ret;
+   // cn0411_dev->ch_gain = CH_GAIN_RES_20M;
+   // ret = CN0411_read_vdac(cn0411_dev);
+   // if (ret == CN0411_FAILURE)
+   //    return ret;
 
    cn0411_dev->v_exc = cn0411_dev->read_dac;
    ret = CN0411_DAC_set_value(cn0411_dev, cn0411_dev->v_exc);
    if (ret == CN0411_FAILURE)
       return ret;
 
-   while (cn0411_dev->ch_gain >= 1) {
-      ret = CN0411_ADC_set_io1(cn0411_dev, cn0411_dev->ch_gain);
-      if (ret == CN0411_FAILURE)
-         return ret;
+   // while (cn0411_dev->ch_gain >= 1) {
+   //    ret = CN0411_ADC_set_io1(cn0411_dev, cn0411_dev->ch_gain);
+   //    if (ret == CN0411_FAILURE)
+   //       return ret;
 
-      ret = CN0411_read_vpp(cn0411_dev);
-      if (ret == CN0411_FAILURE)
-         return ret;
+   //    ret = CN0411_read_vpp(cn0411_dev);
+   //    if (ret == CN0411_FAILURE)
+   //       return ret;
 
-      if ((cn0411_dev->vpp > 0.3 * 2 * cn0411_dev->v_exc) || (cn0411_dev->ch_gain == 1)) {
-         cn0411_dev->v_exc = 0.4 * cn0411_dev->v_exc / cn0411_dev->vpp;
-         ret = CN0411_DAC_set_value(cn0411_dev, cn0411_dev->v_exc);
-         if (ret == CN0411_FAILURE)
-            return ret;
+   //    if ((cn0411_dev->vpp > 0.3 * 2 * cn0411_dev->v_exc) || (cn0411_dev->ch_gain == 1)) {
+   //       cn0411_dev->v_exc = 0.4 * cn0411_dev->v_exc / cn0411_dev->vpp;
+   //       ret = CN0411_DAC_set_value(cn0411_dev, cn0411_dev->v_exc);
+   //       if (ret == CN0411_FAILURE)
+   //          return ret;
 
-         break;
-      } else {
-         cn0411_dev->ch_gain--;
-      }
-   }
+   //       break;
+   //    } else {
+   //       cn0411_dev->ch_gain--;
+   //    }
+   // }
 
    return ret;
 }
@@ -866,12 +866,7 @@ int32_t CN0411_init(struct cn0411_device *cn0411_dev,
        cn0411_init_params.init_solution.init_temp_coeff;
 
    /* Initialize PWM */
-
-   pinMode(16, OUTPUT);
-   pinMode(15, OUTPUT);
-   pinMode(14, OUTPUT);
-
-   CN0411_pwm_freq(PWM_FREQ_94, 50);
+   CN0411_pwm_gen();
    pwm_status = PWM_CONVERSION;
 
    /* Initial Setup ADC */
@@ -909,15 +904,6 @@ int32_t CN0411_init(struct cn0411_device *cn0411_dev,
    ret = CN0411_DAC_set_value(cn0411_dev, cn0411_dev->v_dac);
    if (ret == CN0411_FAILURE)
       return ret;
-
-   Serial.print(F("CN0411 Successfully Initialized!\n"));
-   Serial.print(F("CN0411 Initial Setup:\n"));
-   Serial.print(F("	- ADC set to Single Conversion Mode\n"));
-   Serial.print(F("	- DAC output voltage set to 0.4V\n"));
-   Serial.print(F("	- PWM frequency set to 94Hz\n"));
-   Serial.print(F("	- RTD resistance set to 1kΩ\n"));
-   Serial.print(F("	- Cell Constant set to normal\n"));
-   Serial.print(F("	- Solution set to NaCl\n"));
 
    return ret;
 }

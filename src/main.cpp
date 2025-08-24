@@ -34,44 +34,36 @@
 #include "wifiCredentials.h"
 
 /*
-Task                         Core  Prio                     Descrição
+Task                         Core  Prio                                    Descrição
 --------------------------------------------------------------------------------------------------------------------------
 vTaskMqttLoop                 0     5     Loop dedicado ao client.loop() (subscribe, reconnect e callback) a cada 10 ms
 vTaskCheckWiFi                0     4     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
 vTaskMqttReconnect            0     3     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
-vTaskMqttHandler              1     3     Trata as mensagens recebidas do MQTT e executa as ações correspondentes
 vTaskNTP                      0     1     Atualiza o horário com base no NTP
+vTaskMqttHandler              1     3     Trata as mensagens recebidas do MQTT e executa as ações correspondentes
 vTaskUpdate                   1     3     Atualiza as informações através de um POST no MongoDB Atlas
 vTaskTurnOnPump               1     4     Liga a bomba quando chegar no seu horário de acionamento
 vTaskds18b20SensorRead        1     1     Lê o sensor ds18b20
-vTaskds18b20DataProcess       1     2     Processa os dados do sensor de ds18b20 e envia para o servidor
 vTaskSHT35SensorRead          1     1     Lê o sensor SHT35
-vTaskSHT35DataProcess         1     2     Processa os dados do sensor SHT35 e envia para o servidor
 vTaskPhSensorRead             1     1     Lê o sensor de pH
-vTaskPhDataProcess            1     2     Processa os dados do sensor de pH e envia para o servidor
 vTaskECSensorRead             1     1     Lê o sensor de condutividade elétrica (EC)
-vTaskECDataProcess            1     2     Processa os dados do sensor de condutividade elétrica (EC) e envia para o servidor
+vTaskPhDataProcess            1     2     Processa os dados do sensor de pH
+vTaskECDataProcess            1     2     Processa os dados do sensor de condutividade elétrica (EC)
 --------------------------------------------------------------------------------------------------------------------------
 */
 
 // Tasks delays
-#define UPDATE_DELAY 10000      // 10 segundos
-#define UPDATE_TIMEOUT 3000     // 3 segundos
-#define TURN_ON_PUMP_DELAY 100  // 100 ms
+#define UPDATE_DELAY 10000
+#define UPDATE_TIMEOUT 3000
+#define TURN_ON_PUMP_DELAY 100
 
-#define DS18B20_SENSOR_READ_DELAY 500
-#define DS18B20_DATA_PROCESS_DELAY 1000
-
-#define SHT35_SENSOR_READ_DELAY 500
-#define SHT35_DATA_PROCESS_DELAY 1000
-
+#define DS18B20_SENSOR_READ_DELAY 1000
+#define SHT35_SENSOR_READ_DELAY 1000
 #define PH_SENSOR_READ_DELAY 5000
-#define PH_DATA_PROCESS_DELAY 5000
-#define PH_MOTOR_CONTROL_DELAY 500
-
 #define EC_SENSOR_READ_DELAY 5000
+
+#define PH_DATA_PROCESS_DELAY 5000
 #define EC_DATA_PROCESS_DELAY 5000
-#define EC_MOTOR_CONTROL_DELAY 500
 
 struct cn0411_init_params cn0411_init_params = {
     CH_GAIN_RES_20M,
@@ -200,18 +192,12 @@ TaskHandle_t NTPTaskHandle = NULL;
 TaskHandle_t TurnOnPumpTaskHandle = NULL;
 
 TaskHandle_t ds18b20SensorReadTaskHandle = NULL;
-TaskHandle_t ds18b20DataProcessTaskHandle = NULL;
-
 TaskHandle_t SHT35SensorReadTaskHandle = NULL;
-TaskHandle_t SHT35DataProcessTaskHandle = NULL;
-
 TaskHandle_t PhSensorReadTaskHandle = NULL;
-TaskHandle_t PhDataProcessTaskHandle = NULL;
-TaskHandle_t PhMotorControlTaskHandle = NULL;
-
 TaskHandle_t ECSensorReadTaskHandle = NULL;
+
+TaskHandle_t PhDataProcessTaskHandle = NULL;
 TaskHandle_t ECDataProcessTaskHandle = NULL;
-TaskHandle_t ECMotorControlTaskHandle = NULL;
 
 // FreeRTOS Task Functions
 void vTaskUpdate(void* pvParameters);
@@ -223,15 +209,11 @@ void vTaskNTP(void* pvParameters);
 void vTaskTurnOnPump(void* pvParametes);
 
 void vTaskds18b20SensorRead(void* pvParameters);
-void vTaskds18b20DataProcess(void* pvParameters);
-
 void vTaskSHT35SensorRead(void* pvParameters);
-void vTaskSHT35DataProcess(void* pvParameters);
-
 void vTaskPhSensorRead(void* pvParameters);
-void vTaskPhDataProcess(void* pvParameters);
-
 void vTaskECSensorRead(void* pvParameters);
+
+void vTaskPhDataProcess(void* pvParameters);
 void vTaskECDataProcess(void* pvParameters);
 
 String getDateTime(const RtcDateTime& dt) {
@@ -415,6 +397,8 @@ void initSPIFFS() {
 }
 
 void initWiFi() {
+   uint8_t wifiFailCount = 0;
+
    WiFi.mode(WIFI_STA);
 
    // Configures static IP address
@@ -427,8 +411,12 @@ void initWiFi() {
    Serial.print(" ...");
    WiFi.begin(ssid, password);
    while (WiFi.status() != WL_CONNECTED) {
+      wifiFailCount++;
       Serial.print('.');
       delay(1000);
+
+      if (wifiFailCount >= 15)
+         continue;
    }
    Serial.println();
    Serial.print("MAC Address:  ");
@@ -526,6 +514,22 @@ void initECSensor() {
    }
 
    Serial.printf("CN0411 Initialization successful!\n");
+
+   uint8_t pwm_duty = 50;  // Duty cycle de 50%
+
+   // Define tensão DAC
+   CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
+   if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
+      printf("[ERRO] Falha ao ler a tensão do DAC.\n");
+   } else {
+      printf("Tensão DAC: %.5f V\n", cn0411_dev.read_dac);
+   }
+
+   // Define resistor de ganho
+   CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
+
+   // Define frequência PWM e duty cycle
+   CN0411_pwm_freq(PWM_FREQ_94, pwm_duty);
 }
 
 void initDS3234() {
@@ -604,15 +608,11 @@ void initRtos() {
    }
 
    xTaskCreatePinnedToCore(vTaskds18b20SensorRead, "taskds18b20SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &ds18b20SensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskds18b20DataProcess, "taskds18b20DataProcess", configMINIMAL_STACK_SIZE + 4096, NULL, 2, &ds18b20DataProcessTaskHandle, APP_CPU_NUM);
-
    xTaskCreatePinnedToCore(vTaskSHT35SensorRead, "taskSHT35SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &SHT35SensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskSHT35DataProcess, "taskSHT35DataProcess", configMINIMAL_STACK_SIZE + 4096, NULL, 2, &SHT35DataProcessTaskHandle, APP_CPU_NUM);
-
    xTaskCreatePinnedToCore(vTaskPhSensorRead, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
-
    xTaskCreatePinnedToCore(vTaskECSensorRead, "EC Meter Task", 4096, NULL, 1, &ECSensorReadTaskHandle, APP_CPU_NUM);
+
+   xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskECDataProcess, "EC Data Process Task", 4096, NULL, 2, &ECDataProcessTaskHandle, APP_CPU_NUM);
 
    Serial.println("RTOS initialized");
@@ -667,7 +667,10 @@ void initServer() {
 
 void setup() {
    Serial.begin(115200);
-   while (!Serial);
+   // while (!Serial);
+
+   delay(1000);  // Give time for Serial to initialize
+   Serial.printf("Starting setup...");
 
    SPI_Init();
    initSPIFFS();
@@ -994,19 +997,16 @@ void vTaskTurnOnPump(void* pvParameters) {
 }
 
 void vTaskds18b20SensorRead(void* pvParameters) {
+   float temperatureC;
+
    while (1) {
       sensors.requestTemperatures();
-      vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
-   }
-}
 
-void vTaskds18b20DataProcess(void* pvParameters) {
-   while (1) {
-      float temperatureC = sensors.getTempCByIndex(0);
+      temperatureC = sensors.getTempCByIndex(0);
 
       if (temperatureC == DEVICE_DISCONNECTED_C) {
          printf("❌ Failed to read temperature from DS18B20 sensor, retrying...\n");
-         vTaskDelay(pdMS_TO_TICKS(DS18B20_DATA_PROCESS_DELAY));
+         vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
          continue;
       }
 
@@ -1026,24 +1026,15 @@ void vTaskds18b20DataProcess(void* pvParameters) {
          printf("❌ No internet connection, skipping data processing.");
       }
 
-      vTaskDelay(pdMS_TO_TICKS(DS18B20_DATA_PROCESS_DELAY));
+      vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
    }
 }
 
 void vTaskSHT35SensorRead(void* pvParameters) {
    while (1) {
       if (!gSht3x.getTemperatureHumidity(sht35Data)) {
-         Serial.println("❌ Failed to read SHT35 data, retrying...");
-      }
-      vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
-   }
-}
-
-void vTaskSHT35DataProcess(void* pvParameters) {
-   while (1) {
-      if (!gSht3x.getTemperatureHumidity(sht35Data)) {
          printf("❌ Failed to read SHT35 data, retrying...\n");
-         vTaskDelay(pdMS_TO_TICKS(SHT35_DATA_PROCESS_DELAY));
+         vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
          continue;
       }
 
@@ -1066,7 +1057,7 @@ void vTaskSHT35DataProcess(void* pvParameters) {
          printf("❌ No internet connection, skipping data processing.\n");
       }
 
-      vTaskDelay(pdMS_TO_TICKS(SHT35_DATA_PROCESS_DELAY));
+      vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
    }
 }
 
@@ -1075,20 +1066,20 @@ void vTaskPhSensorRead(void* pvParameters) {
    while (1) {
       AVDD = CN0326_CalculateAVDD();
       internalTemp = CN0326_CalculateInternalTemp();
-      temp = CN0326_CalculateTemp();
       ph = CN0326_CalculatePH();
+      temp = CN0326_CalculateTemp();
 
       if (WiFi.status() == WL_CONNECTED) {
-         String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/ph";
+         String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/ph";
          String phPayload = String(ph);
 
-         String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/temperature";
+         String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/temperature";
          String tempPayload = String(temp);
 
-         String internalTempTopic = String("sensors/") + String(WiFi.getHostname()) + "/internalTemperature";
+         String internalTempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/internalTemperature";
          String internalTempPayload = String(internalTemp);
 
-         String avddTopic = String("sensors/") + String(WiFi.getHostname()) + "/avdd";
+         String avddTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/avdd";
          String avddPayload = String(AVDD);
 
          if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
@@ -1117,75 +1108,65 @@ void vTaskPhDataProcess(void* pvParameters) {
 }
 
 void vTaskECSensorRead(void* pvParameters) {
-   static float dac_voltage = 0.0;
-   static bool ascending = true;
+   while (true) {
+      // PWM principal com 50% duty
+      digitalWrite(PWM_MAIN_PIN, HIGH);
+      digitalWrite(PWM_POS_PIN, HIGH);
+      digitalWrite(PWM_NEG_PIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
 
-   while (1) {
+      digitalWrite(PWM_MAIN_PIN, LOW);
+      digitalWrite(PWM_POS_PIN, LOW);
+      digitalWrite(PWM_NEG_PIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
+
       if (xSemaphoreTake(xSPIMutex, portMAX_DELAY)) {
-         printf("🔐 SPIMutex acquired in vTaskECSensorRead.\n");
-         // Escreve no DAC
-         CN0411_DAC_set_value(&cn0411_dev, dac_voltage);
-
-         // Lê a tensão atual no DAC via ADC (canal 3)
-         if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
-            printf("[ERRO] Falha ao ler a tensão do DAC.\n");
-         } else {
-            printf("Tensão DAC escrita: %.2f V | Tensão DAC lida: %.5f V\n",
-                   dac_voltage, cn0411_dev.read_dac);
-         }
-
          CN0411_read_temp(&cn0411_dev);
-         printf("Temperatura lida: %.2f °C\n", cn0411_dev.temp);
-
+         CN0411_compute_cond(&cn0411_dev);
+         CN0411_compensate_cond(&cn0411_dev);
+         CN0411_compute_tds(&cn0411_dev);
          xSemaphoreGive(xSPIMutex);
-         printf("🔓 SPIMutex released after vTaskECSensorRead.\n");
-      } else {
-         printf("⚠️ Timeout while trying to acquire xSPIMutex in vTaskECSensorRead\n");
       }
 
-      // Atualiza tensão do DAC
-      if (ascending) {
-         dac_voltage += 0.1;
-         if (dac_voltage >= 2.0) {
-            dac_voltage = 2.0;
-            ascending = false;
+      String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/temperature";
+      String tempPayload = String(cn0411_dev.temp);
+
+      String vppTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/vpp";
+      String vppPayload = String(cn0411_dev.vpp);
+
+      String rdResTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/rdres";
+      String rdResPayload = String(cn0411_dev.rdres);
+
+      String condTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/cond";
+      String condPayload = String(1000000 * cn0411_dev.cond);
+
+      String compensatedCondTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/compensatedCond";
+      String compensatedCondPayload = String(1000000 * cn0411_dev.comp_cond);
+
+      String tdsTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/tds";
+      String tdsPayload = String(1000000 * cn0411_dev.tds);
+
+      if (WiFi.status() == WL_CONNECTED) {
+         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
+            if (client.connected()) {
+               client.publish(tempTopic.c_str(), tempPayload.c_str());
+               client.publish(vppTopic.c_str(), vppPayload.c_str());
+               client.publish(rdResTopic.c_str(), rdResPayload.c_str());
+               client.publish(condTopic.c_str(), condPayload.c_str());
+               client.publish(compensatedCondTopic.c_str(), compensatedCondPayload.c_str());
+               client.publish(tdsTopic.c_str(), tdsPayload.c_str());
+               xSemaphoreGive(xWifiMutex);
+            } else {
+               printf("❌ MQTT client not connected, cannot publish EC data.\n");
+            }
          }
       } else {
-         dac_voltage -= 0.1;
-         if (dac_voltage <= 0.0) {
-            dac_voltage = 0.0;
-            ascending = true;
-         }
+         printf("❌ No internet connection, skipping data processing.\n");
       }
 
-      vTaskDelay(pdMS_TO_TICKS(2000));  // Espera 2 segundos
+      vTaskDelay(pdMS_TO_TICKS(EC_SENSOR_READ_DELAY));
    }
 }
-
-// void vTaskECSensorRead(void* pvParameters) {
-//    // Define tensão DAC
-//    CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
-
-//    // Define resistor de ganho
-//    CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
-
-//    // Define frequência PWM e duty cycle
-//    CN0411_pwm_freq(PWM_FREQ_94, 50);
-
-//    // Laço principal da task
-//    while (true) {
-//       // PWM principal com 50% duty
-//       digitalWrite(PWM_MAIN_PIN, HIGH);
-//       digitalWrite(PWM_POS_PIN, HIGH);
-//       digitalWrite(PWM_NEG_PIN, LOW);
-//       vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
-
-//       digitalWrite(PWM_MAIN_PIN, LOW);
-//       digitalWrite(PWM_POS_PIN, LOW);
-//       digitalWrite(PWM_NEG_PIN, HIGH);
-//       vTaskDelay(pdMS_TO_TICKS(5));  // metade do período (aprox. 5.3ms)
-//    }
-// }
 
 void vTaskECDataProcess(void* pvParameters) {
    while (1) {

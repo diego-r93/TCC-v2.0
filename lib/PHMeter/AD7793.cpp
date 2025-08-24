@@ -95,7 +95,7 @@ uint32_t AD7793_Scan(enMode mode, uint8_t ui8channel) {
       AD7793_WriteRegister(AD7793_REG_CONF, (AD7793_GAIN << 8) | AD7793_REFSEL | AD7793_BUF);
       AD7793_WriteRegister(AD7793_REG_IO, 0x02);
       
-      // AD7793_Calibrate(ui8channel, CAL_INT_FULL_MODE);
+      AD7793_Calibrate(ui8channel, CAL_INT_FULL_MODE);
 
       AD7793_SelectChannel(ui8channel); /* Select channel to scan */
 

@@ -54,7 +54,7 @@
 #define CN0411_FAILURE -1
 #define CS_AD7124 0
 #define CS_AD5683 1
-#define INSTR_AMP_GAIN 10   // Usar 10 para o ESP32 normal e 9 na placa TCC
+#define INSTR_AMP_GAIN 10
 #define ADC_TIMEOUT 100000  // Mude esse valor se estiver no ESP32 para 100000
 #define ADC_CH_DISABLE 0
 #define ADC_CH_ENABLE 1
@@ -129,8 +129,8 @@
 #define CELL_CONST_HIGH 10
 #define TDS_KCL 0.5
 #define TDS_NACL 0.47
-#define TEMP_COEFF_KCL 1.88
-#define TEMP_COEFF_NACL 2.14
+#define TEMP_COEFF_KCL 0.0188
+#define TEMP_COEFF_NACL 0.0214
 #define VREF 2.5
 #define A_CONST (3.9083 * pow(10, -3))
 #define B_CONST (-5.775 * pow(10, -7))

@@ -61,7 +61,6 @@ float CN0326_CalculateTemp(void) {
    f32voltage = AD7793_ConvertToVolts(ui32adcValue); /* Convert ADC output value to voltage */
 
    res = f32voltage / f32current; /* Calculate RTD resistance */
-   // printf(" | ADC Value: %li | Voltage: %.4f | Current: %.4f | Resistance: %.4f\n", ui32adcValue, f32voltage, f32current, res);
 
    temp = ((res - RMIN) / (TEMP_COEFF * RMIN)); /* Calculate temperature value */
 
