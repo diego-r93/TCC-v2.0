@@ -24,6 +24,7 @@
 #include "PIDController.h"
 #include "SHT3x.h"
 #include "SPIFFS.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -31,6 +32,7 @@
 #include "freertos/timers.h"
 #include "hydraulicPumpController.h"
 #include "mongoDbAtlas.h"
+#include "mqttCredentials.h"
 #include "wifiCredentials.h"
 
 /*
@@ -57,7 +59,7 @@ vTaskECDataProcess            1     2     Processa os dados do sensor de conduti
 #define UPDATE_TIMEOUT 3000
 #define TURN_ON_PUMP_DELAY 100
 
-#define DS18B20_SENSOR_READ_DELAY 1000
+#define DS18B20_SENSOR_READ_DELAY 5000
 #define SHT35_SENSOR_READ_DELAY 1000
 #define PH_SENSOR_READ_DELAY 5000
 #define EC_SENSOR_READ_DELAY 5000
@@ -120,20 +122,10 @@ const int numPumps = sizeof(myPumps) / sizeof(myPumps[0]);
 WiFiUDP udp;
 NTPClient ntp(udp, "a.st1.ntp.br", -3 * 3600, NTP_UPDATE_INTERVAL);
 
-// Set your Static IP address
-// IPAddress local_IP(192, 168, 1, 2);
-// Set your Gateway IP address
-// IPAddress gateway(192, 168, 1, 254);
-// Set your SubnetMask
-// IPAddress subnet(255, 255, 255, 0);
-
 // MQTT configuration
 #define MQTT_LOOP_DELAY 10           // 10 ms
 #define CHECK_MQTT_DELAY 1000        // 1 segundo
 #define MQTT_RECONNECT_TIMEOUT 5000  // 5 segundos
-
-String mqtt_server = "192.168.0.100";
-const uint16_t mqtt_port = 1883;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -303,7 +295,7 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    bool beginOK = https.begin(client, serverName);
 
    if (!beginOK) {
-      Serial.printf("❌ HTTPS begin() failed");
+      ESP_LOGE("HTTPS", "❌ HTTPS begin() failed");
       return;
    }
 
@@ -314,11 +306,11 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    int httpResponseCode = https.POST(json);
 
    if (httpResponseCode <= 0) {
-      Serial.printf("❌ POST failed. Error code: %d\n", httpResponseCode);
+      ESP_LOGE("HTTPS", "❌ POST failed. Error code: %d", httpResponseCode);
       https.end();  // Libera conexão
       return;
    } else {
-      Serial.printf("✅ POST successful. Response code: %d\n", httpResponseCode);
+      ESP_LOGI("HTTPS", "✅ POST successful. Response code: %d", httpResponseCode);
    }
 
    String payload = https.getString();
@@ -327,7 +319,7 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    DeserializationError error = deserializeJson(response, payload);
 
    if (error) {
-      Serial.printf("❌ Failed to parse JSON response.");
+      ESP_LOGE("HTTPS", "❌ Failed to parse JSON response.");
       return;
    }
 
@@ -356,7 +348,7 @@ void saveDriveTimes(const std::set<String>& driveTimes, const String& filename) 
    File file = SPIFFS.open(filename, FILE_WRITE);
 
    if (!file) {
-      Serial.println("❌ Failed to open file for writing");
+      ESP_LOGE("SPIFFS", "❌ Failed to open file for writing");
       return;
    }
 
@@ -366,13 +358,13 @@ void saveDriveTimes(const std::set<String>& driveTimes, const String& filename) 
    }
 
    file.close();
-   Serial.println("✅ Drive times saved successfully");
+   ESP_LOGI("SPIFFS", "✅ Drive times saved successfully");
 }
 
 void loadDriveTimes(std::set<String>& driveTimes, const String& filename) {
    File file = SPIFFS.open(filename, FILE_READ);
    if (!file) {
-      Serial.println("❌ Failed to open file for reading");
+      ESP_LOGE("SPIFFS", "❌ Failed to open file for reading");
       return;
    }
 
@@ -386,57 +378,58 @@ void loadDriveTimes(std::set<String>& driveTimes, const String& filename) {
    }
 
    file.close();
-   Serial.println("✅ Drive times loaded successfully");
+   ESP_LOGI("SPIFFS", "✅ Drive times loaded successfully");
 }
 
 void initSPIFFS() {
    if (!SPIFFS.begin(true)) {
-      Serial.println("❌ An error has occurred while mounting SPIFFS");
+      ESP_LOGE("SPIFFS", "An error has occurred while mounting SPIFFS");
    }
-   Serial.println("✅ SPIFFS mounted successfully");
+   ESP_LOGI("SPIFFS", "SPIFFS mounted successfully");
 }
 
-void initWiFi() {
-   uint8_t wifiFailCount = 0;
-
+bool initWiFi(uint32_t timeout_ms = 15000, uint8_t max_retries = 3) {
    WiFi.mode(WIFI_STA);
+   WiFi.persistent(false);  // opcional: não grava em NVS a cada begin
+   WiFi.setAutoReconnect(true);
 
-   // Configures static IP address
-   // if (!WiFi.config(local_IP, gateway, subnet)) {
-   //    Serial.println("STA Failed to configure");
-   // }
+   uint8_t attempt = 0;
+   while (attempt < max_retries) {
+      attempt++;
+      ESP_LOGI("WIFI", "Connecting to WiFi %s (attempt %u/%u)...", ssid, attempt, max_retries);
+      WiFi.begin(ssid, password);
 
-   Serial.print("Connecting to WiFi ");
-   Serial.print(ssid);
-   Serial.print(" ...");
-   WiFi.begin(ssid, password);
-   while (WiFi.status() != WL_CONNECTED) {
-      wifiFailCount++;
-      Serial.print('.');
-      delay(1000);
-
-      if (wifiFailCount >= 15)
-         continue;
-   }
-   Serial.println();
-   Serial.print("MAC Address:  ");
-   Serial.println(WiFi.macAddress());
-   Serial.print("Local IP:  ");
-   Serial.println(WiFi.localIP());
-   Serial.print("Hostname:  ");
-   Serial.println(WiFi.getHostname());
-   Serial.print("Gateway padrão da rede: ");
-   Serial.println(WiFi.gatewayIP().toString());
-
-   if (!MDNS.begin(WiFi.getHostname())) {
-      Serial.println("Error setting up MDNS responder!");
-      while (1) {
-         delay(1000);
+      uint32_t start = millis();
+      while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeout_ms) {
+         ESP_LOGI("WIFI", ".");
+         delay(500);
       }
+
+      if (WiFi.status() == WL_CONNECTED) {
+         ESP_LOGI("WIFI", "WiFi connected.");
+         ESP_LOGI("WIFI", "MAC Address: %s", WiFi.macAddress().c_str());
+         ESP_LOGI("WIFI", "Local IP: %s", WiFi.localIP().toString().c_str());
+         ESP_LOGI("WIFI", "Hostname: %s", WiFi.getHostname());
+         ESP_LOGI("WIFI", "Gateway: %s", WiFi.gatewayIP().toString().c_str());
+         ESP_LOGI("WIFI", "Subnet Mask: %s", WiFi.subnetMask().toString().c_str());
+
+         // mDNS (só inicia se conectado)
+         if (!MDNS.begin(WiFi.getHostname())) {
+            ESP_LOGE("WIFI", "Error setting up MDNS responder!");
+            return false;
+         }
+         ESP_LOGI("WIFI", "mDNS started at %s.local", WiFi.getHostname());
+         return true;
+      }
+
+      // chegou aqui sem conectar no timeout: limpa e tenta de novo
+      ESP_LOGW("WIFI", "Connection timed out. Retrying...");
+      WiFi.disconnect(true /*wifioff*/);
+      delay(500);
    }
-   Serial.println("mDNS responder started");
-   Serial.print("mDNS Adress:  ");
-   Serial.println(WiFi.getHostname());
+
+   ESP_LOGE("WIFI", "Failed to connect to WiFi after %u attempts", max_retries);
+   return false;
 }
 
 void initNTP() {
@@ -444,59 +437,56 @@ void initNTP() {
    ntp.forceUpdate();
 }
 
-void initMqtt() {
-   // Obter o gateway padrão da rede
-   // IPAddress gateway = WiFi.gatewayIP();
-   // mqtt_server = gateway.toString();
-
-   client.setServer(mqtt_server.c_str(), mqtt_port);
+bool initMqtt(uint8_t max_retries = 3) {
+   client.setServer(mqtt_server, mqtt_port);
    client.setCallback(mqttCallback);
    client.setBufferSize(2048);
-
-   // Configure connection timeouts and keep-alive before connecting
    // client.setSocketTimeout(3);  // Maximum blocking time in seconds
    // client.setKeepAlive(30);     // Interval in seconds for PINGREQ to broker
 
+   if (WiFi.status() != WL_CONNECTED) {
+      ESP_LOGE("MQTT", "WiFi not connected");
+      return false;
+   }
+
    const char* clientId = WiFi.getHostname();
-   const char* user = "diego";
-   const char* password = "D1993rS*";
 
-   Serial.print("Attempting MQTT connection on: ");
-   Serial.print(mqtt_server);
-   Serial.print(":");
-   Serial.print(mqtt_port);
-   Serial.print(" ...");
-   while (!client.connected()) {
-      Serial.print('.');
+   for (uint8_t attempt = 1; attempt <= max_retries; ++attempt) {
+      ESP_LOGI("MQTT", "Attempting MQTT connection on %s:%d (attempt %u/%u)...", mqtt_server, mqtt_port, attempt, max_retries);
 
-      if (client.connect(clientId, user, password)) {  // Não confundir o id com o server
-         Serial.println(" connected.");
+      client.disconnect();
+
+      if (client.connect(clientId, mqtt_user, mqtt_password)) {
+         ESP_LOGI("MQTT", "MQTT connected.");
          String outTopic = String(clientId) + "/output";
          client.subscribe(outTopic.c_str());
          client.subscribe("getdevices");
-      } else {
-         Serial.println("Failed, reconnecting ... ");
-         Serial.print("Client State: ");
-         Serial.println(client.state());
+         ESP_LOGI("MQTT", "Subscribed to topics: %s and getdevices", outTopic.c_str());
+         return true;
       }
 
-      delay(1000);
+      ESP_LOGE("MQTT", "Failed to connect to MQTT broker. State: %d", client.state());
+      delay(500);
    }
+
+   ESP_LOGE("MQTT", "Failed to connect to MQTT broker after %u attempts", max_retries);
+   return false;
 }
 
 void initds18b20Sensor() {
    sensors.begin();
-   Serial.println("DS18B20 sensor initialized");
+   ESP_LOGI("DS18B20", "Found %d devices.", sensors.getDeviceCount());
+   ESP_LOGI("DS18B20", "DS18B20 sensor initialized");
 }
 
 void initSHT35() {
    Wire.begin(1, 2);
 
    if (!gSht3x.begin()) {
-      Serial.println("gSht3x.begin() failed\n");
+      ESP_LOGE("SHT35", "gSht3x.begin() failed");
    }
 
-   Serial.println("SHT35 sensor initialized");
+   ESP_LOGI("SHT35", "SHT35 sensor initialized");
 }
 
 void initPhSensor() {
@@ -510,19 +500,19 @@ void initECSensor() {
    ret = CN0411_init(&cn0411_dev, cn0411_init_params);
 
    if (ret == CN0411_FAILURE) {
-      Serial.printf("CN0411 Initialization error!\n");
+      ESP_LOGE("ECSensor", "CN0411 Initialization error!");
    }
 
-   Serial.printf("CN0411 Initialization successful!\n");
+   ESP_LOGI("ECSensor", "CN0411 Initialization successful!");
 
    uint8_t pwm_duty = 50;  // Duty cycle de 50%
 
    // Define tensão DAC
    CN0411_DAC_set_value(&cn0411_dev, DAC_OUT_DEFAULT_VAL);
    if (CN0411_read_vdac(&cn0411_dev) == CN0411_FAILURE) {
-      printf("[ERRO] Falha ao ler a tensão do DAC.\n");
+      ESP_LOGE("ECSensor", "Falha ao ler a tensão do DAC.");
    } else {
-      printf("Tensão DAC: %.5f V\n", cn0411_dev.read_dac);
+      ESP_LOGI("ECSensor", "Tensão DAC: %.5f V", cn0411_dev.read_dac);
    }
 
    // Define resistor de ganho
@@ -543,7 +533,7 @@ void initDS3234() {
       //    1) first time you ran and the device wasn't running yet
       //    2) the battery on the device is low or even missing
 
-      Serial.println("RTC lost confidence in the DateTime!");
+      ESP_LOGE("RTC", "RTC lost confidence in the DateTime!");
 
       // following line sets the RTC to the date & time this sketch was compiled
       // it will also reset the valid flag internally unless the Rtc device is
@@ -551,7 +541,7 @@ void initDS3234() {
    }
 
    if (!Rtc.GetIsRunning()) {
-      Serial.println("RTC was not actively running, starting now");
+      ESP_LOGI("RTC", "RTC was not actively running, starting now");
       Rtc.SetIsRunning(true);
    }
 
@@ -559,24 +549,24 @@ void initDS3234() {
    if (ntp.forceUpdate()) {
       unsigned long epoch = ntp.getEpochTime();
       RtcDateTime dt = convertEpochToDateTime(epoch);
-      printf("RTC synchronized by NTP at init: %s\n", getDateTime(dt).c_str());
+      ESP_LOGI("RTC", "RTC synchronized by NTP at init: %s", getDateTime(dt).c_str());
       Rtc.SetDateTime(dt);
    } else {
       // se NTP falhou e RTC era inválido, usa compile time
       if (!Rtc.IsDateTimeValid()) {
-         printf("Setting RTC to compile time: %s\n", getDateTime(compiled).c_str());
+         ESP_LOGI("RTC", "Setting RTC to compile time: %s", getDateTime(compiled).c_str());
          Rtc.SetDateTime(compiled);
       }
    }
 
    RtcDateTime now = Rtc.GetDateTime();
    if (now < compiled) {
-      Serial.println("RTC is older than compile time!  (Updating DateTime)");
+      ESP_LOGI("RTC", "RTC is older than compile time!  (Updating DateTime)");
       Rtc.SetDateTime(compiled);
    } else if (now > compiled) {
-      Serial.println("RTC is newer than compile time. (this is expected)");
+      ESP_LOGI("RTC", "RTC is newer than compile time. (this is expected)");
    } else if (now == compiled) {
-      Serial.println("RTC is the same as compile time! (not expected but all is fine)");
+      ESP_LOGI("RTC", "RTC is the same as compile time! (not expected but all is fine)");
    }
 
    // never assume the Rtc was last configured by you, so
@@ -584,14 +574,14 @@ void initDS3234() {
    Rtc.Enable32kHzPin(false);
    Rtc.SetSquareWavePin(DS3234SquareWavePin_ModeNone);
 
-   Serial.println("RTC initialized");
+   ESP_LOGI("RTC", "RTC initialized");
 }
 
 void initDRV8243Configuration() {
    if (!drvController.begin()) {
-      Serial.println("[ERROR] falha ao inicializar DRV8243Controller");
+      ESP_LOGE("DRV8243", "Failed to initialize DRV8243Controller");
    } else {
-      Serial.println("DRV8243Controller iniciado com sucesso");
+      ESP_LOGI("DRV8243", "DRV8243Controller initialized successfully");
    }
 }
 
@@ -615,7 +605,7 @@ void initRtos() {
    xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskECDataProcess, "EC Data Process Task", 4096, NULL, 2, &ECDataProcessTaskHandle, APP_CPU_NUM);
 
-   Serial.println("RTOS initialized");
+   ESP_LOGI("RTOS", "All tasks created successfully");
 }
 
 void initServer() {
@@ -662,21 +652,25 @@ void initServer() {
 
    server.begin();
 
-   Serial.println("HTTP server started");
+   ESP_LOGI("HTTP", "HTTP server started");
 }
 
 void setup() {
    Serial.begin(115200);
    // while (!Serial);
-
    delay(1000);  // Give time for Serial to initialize
-   Serial.printf("Starting setup...");
 
    SPI_Init();
    initSPIFFS();
-   initWiFi();
+
+   if (!initWiFi(15000, 3)) {
+      ESP_LOGE("SETUP", "Failed to connect to WiFi. Starting without WiFi.");
+   }
    initNTP();
-   initMqtt();
+
+   if (!initMqtt()) {
+      ESP_LOGE("SETUP", "Failed to connect to MQTT broker. Starting without MQTT.");
+   }
 
    xSPIMutex = xSemaphoreCreateMutex();
    configASSERT(xSPIMutex);
@@ -701,13 +695,13 @@ void setup() {
    initServer();
    initRtos();
 
-   Serial.printf("Total heap: %d\n", ESP.getHeapSize());
-   Serial.printf("Free heap: %d\n", ESP.getFreeHeap());
-   Serial.printf("Total PSRAM: %d\n", ESP.getPsramSize());
-   Serial.printf("Free PSRAM: %d\n", ESP.getFreePsram());
-   Serial.printf("Total Flash: %d\n", ESP.getFlashChipSize());
-   Serial.printf("Free Flash: %d\n", ESP.getFreeSketchSpace());
-   Serial.printf("Sketch size: %d\n", ESP.getSketchSize());
+   ESP_LOGI("MEM", "Total heap: %d\n", ESP.getHeapSize());
+   ESP_LOGI("MEM", "Free heap: %d\n", ESP.getFreeHeap());
+   ESP_LOGI("MEM", "Total PSRAM: %d\n", ESP.getPsramSize());
+   ESP_LOGI("MEM", "Free PSRAM: %d\n", ESP.getFreePsram());
+   ESP_LOGI("MEM", "Total Flash: %d\n", ESP.getFlashChipSize());
+   ESP_LOGI("MEM", "Free Flash: %d\n", ESP.getFreeSketchSpace());
+   ESP_LOGI("MEM", "Sketch size: %d\n", ESP.getSketchSize());
 
    // Allow the hardware to sort itself out
    delay(1000);
@@ -718,43 +712,66 @@ void loop() {
 }
 
 void vTaskCheckWiFi(void* pvParameters) {
-   static int wifiFailCount = 0;
+   const uint32_t timeout_ms = 15000;  // igual ao initWiFi
+   const uint8_t max_retries = 3;      // igual ao initWiFi
 
    while (1) {
       if (WiFi.status() != WL_CONNECTED) {
-         wifiFailCount++;
-         printf("❌ WiFi failure count: %d\n", wifiFailCount);
+         ESP_LOGE("WIFI", "⚠️ WiFi disconnected!");
 
-         if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(WIFI_TIMEOUT))) {
-            printf("🔐 WiFi mutex acquired in vTaskCheckWiFi.\n");
-            printf("⚠️ WiFi disconnected. Reconnecting to WiFi...\n");
+         uint8_t attempt = 0;
+         while (attempt < max_retries && WiFi.status() != WL_CONNECTED) {
+            attempt++;
+            ESP_LOGI("WIFI", "Connecting to WiFi %s (attempt %u/%u)...", ssid, attempt, max_retries);
 
-            WiFi.disconnect(true, false);     // disconnect and erase credentials
-            WiFi.mode(WIFI_OFF);              // turn off WiFi interface
-            vTaskDelay(pdMS_TO_TICKS(1000));  // wait for proper shutdown
+            if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(WIFI_TIMEOUT))) {
+               WiFi.begin(ssid, password);
+               xSemaphoreGive(xWifiMutex);
+            } else {
+               ESP_LOGW("WIFI", "Timeout trying to acquire xWifiMutex for WiFi.begin(); retrying...");
+               vTaskDelay(pdMS_TO_TICKS(CHECK_WIFI_DELAY));
+               continue;
+            }
 
-            WiFi.mode(WIFI_STA);         // switch back to station mode
-            WiFi.begin(ssid, password);  // attempt to reconnect
-            printf("🔁 WiFi.begin called after reset.\n");
+            // Espera conectar (SEM mutex)
+            uint32_t start = millis();
+            while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeout_ms) {
+               ESP_LOGI("WIFI", ".");
+               vTaskDelay(pdMS_TO_TICKS(CHECK_WIFI_DELAY));  // yield sem travar o RTOS
+            }
 
-            xSemaphoreGive(xWifiMutex);
-            printf("🔓 WiFi mutex released after vTaskCheckWiFi.\n");
+            if (WiFi.status() != WL_CONNECTED) {
+               ESP_LOGW("WIFI", "Connection timed out. Retrying...");
+
+               // Desassociar/zerar sessão (curto e com mutex)
+               if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(WIFI_TIMEOUT))) {
+                  WiFi.disconnect(true /* wifioff */);  // igual ao seu initWiFi
+                  xSemaphoreGive(xWifiMutex);
+               } else {
+                  ESP_LOGW("WIFI", "Timeout ao pegar xWifiMutex para WiFi.disconnect()");
+               }
+
+               vTaskDelay(pdMS_TO_TICKS(CHECK_WIFI_DELAY));
+            }
+         }
+
+         if (WiFi.status() == WL_CONNECTED) {
+            ESP_LOGI("WIFI", "WiFi connected.");
+            ESP_LOGI("WIFI", "MAC Address: %s", WiFi.macAddress().c_str());
+            ESP_LOGI("WIFI", "Local IP: %s", WiFi.localIP().toString().c_str());
+            ESP_LOGI("WIFI", "Hostname: %s", WiFi.getHostname());
+            ESP_LOGI("WIFI", "Gateway: %s", WiFi.gatewayIP().toString().c_str());
+            ESP_LOGI("WIFI", "Subnet Mask: %s", WiFi.subnetMask().toString().c_str());
+
+            // garante mDNS quando reconectar (mesma política do initWiFi)
+            if (!MDNS.begin(WiFi.getHostname())) {
+               ESP_LOGE("WIFI", "Error setting up MDNS responder!");
+            } else {
+               ESP_LOGI("WIFI", "mDNS started at %s.local", WiFi.getHostname());
+            }
          } else {
-            printf("⚠️ Timeout while trying to acquire xWifiMutex in vTaskCheckWiFi\n");
+            ESP_LOGE("WIFI", "Failed to connect to WiFi after %u attempts. Keeping offline.", max_retries);
          }
-
-         // If reconnection fails repeatedly, restart the ESP
-         if (wifiFailCount >= 10) {
-            printf("🚨 Persistent WiFi failure. Restarting ESP...\n");
-            vTaskDelay(pdMS_TO_TICKS(200));
-            ESP.restart();
-         }
-
-      } else {
-         if (wifiFailCount > 0) {
-            printf("✅ WiFi reconnected successfully.\n");
-         }
-         wifiFailCount = 0;
       }
 
       vTaskDelay(pdMS_TO_TICKS(CHECK_WIFI_DELAY));
@@ -765,26 +782,26 @@ void vTaskNTP(void* pvParameters) {
    while (1) {
       if ((WiFi.status() == WL_CONNECTED) && ntp.update()) {
          if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(NTP_TIMEOUT))) {
-            printf("🔐 WiFi mutex acquired for NTP update.\n");
+            ESP_LOGI("NTP", "🔐 WiFi mutex acquired for NTP update.");
             unsigned long epochTime = ntp.getEpochTime();
             RtcDateTime newTime = convertEpochToDateTime(epochTime);
 
             // debug: checa RTC antes da escrita
             if (!Rtc.IsDateTimeValid()) {
-               printf("⚠️ RTC inválido antes de NTP update\n");
+               ESP_LOGW("NTP", "⚠️ RTC inválido antes de NTP update");
             }
             if (!Rtc.GetIsRunning()) {
-               printf("⚠️ Oscilador RTC parado antes de update — reiniciando\n");
+               ESP_LOGW("NTP", "⚠️ Oscilador RTC parado antes de update — reiniciando");
                Rtc.SetIsRunning(true);
             }
 
             // escreve no DS3234
             Rtc.SetDateTime(newTime);
-            printf("✅ Time updated from NTP: %s\n", getDateTime(newTime).c_str());
+            ESP_LOGI("NTP", "✅ Time updated from NTP: %s", getDateTime(newTime).c_str());
             xSemaphoreGive(xWifiMutex);
-            printf("🔓 WiFi mutex released after NTP update.\n");
+            ESP_LOGI("NTP", "🔓 WiFi mutex released after NTP update.");
          } else {
-            Serial.println("⚠️ Timeout while trying to acquire xWifiMutex in vTaskNTP\n");
+            ESP_LOGW("NTP", "⚠️ Timeout while trying to acquire xWifiMutex in vTaskNTP");
          }
       }
 
@@ -816,41 +833,37 @@ void vTaskMqttLoop(void* pvParameters) {
 // -----------------------------------------------------------------------------
 void vTaskMqttReconnect(void* parameter) {
    const char* clientId = WiFi.getHostname();
-   const char* user = "diego";
-   const char* password = "D1993rS*";
 
    while (1) {
       if (client.connected()) {
          vTaskDelay(pdMS_TO_TICKS(CHECK_MQTT_DELAY));
          continue;
       } else {
-         Serial.println("⚠️ MQTT client not connected, attempting to reconnect...\n");
+         ESP_LOGW("MQTT", "⚠️ MQTT client not connected, attempting to reconnect...\n");
 
          if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("✅ WiFi is connected, trying to reconnect MQTT client...\n");
+            ESP_LOGI("MQTT", "✅ WiFi is connected, trying to reconnect MQTT client...\n");
 
             if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(MQTT_RECONNECT_TIMEOUT))) {
-               Serial.printf("🔐 WiFi mutex acquired for MQTT Reconnect.\n");
+               ESP_LOGI("MQTT", "🔐 WiFi mutex acquired for MQTT Reconnect.\n");
                client.disconnect();         // Clean any stale session
                xSemaphoreGive(xWifiMutex);  // Immediately release the mutex
-               Serial.printf("🔓 WiFi mutex released after disconnect.\n");
+               ESP_LOGI("MQTT", "🔓 WiFi mutex released after disconnect.\n");
 
-               if (client.connect(clientId, user, password)) {
-                  printf("✅ Reconnected as '%s'. Subscribing...\n", clientId);
+               if (client.connect(clientId, mqtt_user, mqtt_password)) {
+                  ESP_LOGI("MQTT", "✅ Reconnected as '%s'. Subscribing...\n", clientId);
                   String outTopic = String(clientId) + "/output";
                   client.subscribe(outTopic.c_str());
                   client.subscribe("getdevices");
-                  printf("✅ Subscriptions done.\n");
+                  ESP_LOGI("MQTT", "✅ Subscriptions done.\n");
                } else {
-                  printf("⚠️ Reconnect failed (state=%d). Will retry.\n", client.state());
+                  ESP_LOGW("MQTT", "⚠️ Reconnect failed (state=%d). Will retry.\n", client.state());
                }
-
-               // xSemaphoreGive(xWifiMutex);
             } else {
-               Serial.println("⚠️ Timeout while trying to acquire xWifiMutex in vTaskMqttReconnect\n");
+               ESP_LOGW("MQTT", "⚠️ Timeout while trying to acquire xWifiMutex in vTaskMqttReconnect\n");
             }
          } else {
-            Serial.println("⚠️ WiFi is not connected, skipping MQTT reconnect.\n");
+            ESP_LOGW("MQTT", "⚠️ WiFi is not connected, skipping MQTT reconnect.\n");
          }
       }
 
@@ -871,11 +884,11 @@ void vTaskMqttHandler(void* pvParameters) {
       }
 
       // 1) Imprime chegada da mensagem
-      printf("Message arrived on topic: %s. Message: ", msg.topic);
+      ESP_LOGI("MQTT", "Message arrived on topic: %s. Message: ", msg.topic);
       for (size_t i = 0; i < msg.length; ++i) {
-         printf("%c", (char)msg.payload[i]);
+         ESP_LOGI("MQTT", "%c", (char)msg.payload[i]);
       }
-      printf("\n");
+      ESP_LOGI("MQTT", "\n");
 
       // 2) Constrói String para facilitar o JSON
       String topicStr = String(msg.topic);
@@ -886,7 +899,7 @@ void vTaskMqttHandler(void* pvParameters) {
 
       // 3) Trata o tópico "<hostname>/output"
       if (topicStr == String(WiFi.getHostname()) + "/output") {
-         printf("Received command to change motor states\n");
+         ESP_LOGI("MQTT", "Received command to change motor states");
 
          JsonDocument doc;
          DeserializationError err = deserializeJson(doc, messageTemp);
@@ -897,7 +910,7 @@ void vTaskMqttHandler(void* pvParameters) {
                if (doc[key].is<bool>()) {
                   bool state = doc[key];
 
-                  printf("Changing motor %s to %s\n", key.c_str(), state ? "on" : "off");
+                  ESP_LOGI("MQTT", "Changing motor %s to %s\n", key.c_str(), state ? "on" : "off");
 
                   if (state)
                      myPumps[indice].startPump();
@@ -905,11 +918,11 @@ void vTaskMqttHandler(void* pvParameters) {
                      myPumps[indice].stopPump();
                }
             }
-            printf("Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n",
-                   int(myPumps[0].getPumpState()),
-                   int(myPumps[1].getPumpState()),
-                   int(myPumps[2].getPumpState()),
-                   int(myPumps[3].getPumpState()));
+            ESP_LOGI("MQTT", "Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n",
+                     int(myPumps[0].getPumpState()),
+                     int(myPumps[1].getPumpState()),
+                     int(myPumps[2].getPumpState()),
+                     int(myPumps[3].getPumpState()));
          }
       }
       // 4) Trata o tópico "getdevices"
@@ -956,20 +969,19 @@ void vTaskUpdate(void* pvParameters) {
    while (1) {
       if (WiFi.status() == WL_CONNECTED) {
          if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(UPDATE_TIMEOUT))) {
-            Serial.printf("🔐 WiFi mutex acquired for update.\n");
-
+            ESP_LOGI("WIFI", "🔐 WiFi mutex acquired for update.");
             loadConfigurationCloud(pump->getCode(), pump->getJsonDataPointer());
             updateConfiguration(pump->getJsonData(), pump->getDriveTimesPointer(), pump->pulseDurationPointer);
 
             xSemaphoreGive(xWifiMutex);
-            Serial.printf("🔓 WiFi mutex released after update.\n");
+            ESP_LOGI("WIFI", "🔓 WiFi mutex released after update.");
 
             saveDriveTimes(*(pump->getDriveTimesPointer()), "/driveTimes.bin");
          } else {
-            Serial.printf("⚠️ Timeout while trying to acquire xWifiMutex in vTaskUpdate.\n");
+            ESP_LOGE("WIFI", "⚠️ Timeout while trying to acquire xWifiMutex in vTaskUpdate.");
          }
       } else {
-         Serial.printf("⚠️ No internet connection, using stored drive times.\n");
+         ESP_LOGE("WIFI", "⚠️ No internet connection, using stored drive times.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(UPDATE_DELAY));
@@ -988,7 +1000,7 @@ void vTaskTurnOnPump(void* pvParameters) {
 
       for (String driveTime : pump->getDriveTimes()) {
          if (formattedTime == driveTime && !pump->getPumpState()) {
-            printf("🔔 Time to turn on pump %s at %s\n", pump->getCode(), driveTime.c_str());
+            ESP_LOGI("PUMP", "🔔 Time to turn on pump %s at %s\n", pump->getCode(), driveTime.c_str());
             pump->startPump();
          }
       }
@@ -1005,7 +1017,7 @@ void vTaskds18b20SensorRead(void* pvParameters) {
       temperatureC = sensors.getTempCByIndex(0);
 
       if (temperatureC == DEVICE_DISCONNECTED_C) {
-         printf("❌ Failed to read temperature from DS18B20 sensor, retrying...\n");
+         ESP_LOGE("DS18B20", "Failed to read temperature from DS18B20 sensor, retrying...");
          vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
          continue;
       }
@@ -1019,11 +1031,11 @@ void vTaskds18b20SensorRead(void* pvParameters) {
                client.publish(ds18b20Topic.c_str(), ds18b20Payload.c_str());
                xSemaphoreGive(xWifiMutex);
             } else {
-               printf("❌ MQTT client not connected, cannot publish DS18B20 data.\n");
+               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish DS18B20 data.");
             }
          }
       } else {
-         printf("❌ No internet connection, skipping data processing.");
+         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
@@ -1033,7 +1045,7 @@ void vTaskds18b20SensorRead(void* pvParameters) {
 void vTaskSHT35SensorRead(void* pvParameters) {
    while (1) {
       if (!gSht3x.getTemperatureHumidity(sht35Data)) {
-         printf("❌ Failed to read SHT35 data, retrying...\n");
+         ESP_LOGE("SHT35", "Failed to read SHT35 data, retrying...");
          vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
          continue;
       }
@@ -1050,11 +1062,11 @@ void vTaskSHT35SensorRead(void* pvParameters) {
                client.publish(sht35HumTopic.c_str(), sht35HumPayload.c_str());
                xSemaphoreGive(xWifiMutex);
             } else {
-               printf("❌ MQTT client not connected, cannot publish SHT35 data.\n");
+               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish SHT35 data.");
             }
          }
       } else {
-         printf("❌ No internet connection, skipping data processing.\n");
+         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
@@ -1090,11 +1102,11 @@ void vTaskPhSensorRead(void* pvParameters) {
                client.publish(avddTopic.c_str(), avddPayload.c_str());
                xSemaphoreGive(xWifiMutex);
             } else {
-               printf("❌ MQTT client not connected, cannot publish pH data.\n");
+               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish pH data.");
             }
          }
       } else {
-         printf("❌ No internet connection, skipping data processing.\n");
+         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(PH_SENSOR_READ_DELAY));
@@ -1157,11 +1169,11 @@ void vTaskECSensorRead(void* pvParameters) {
                client.publish(tdsTopic.c_str(), tdsPayload.c_str());
                xSemaphoreGive(xWifiMutex);
             } else {
-               printf("❌ MQTT client not connected, cannot publish EC data.\n");
+               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish EC data.");
             }
          }
       } else {
-         printf("❌ No internet connection, skipping data processing.\n");
+         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(EC_SENSOR_READ_DELAY));

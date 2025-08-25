@@ -1,6 +1,7 @@
 #include "DRV8243.h"
 
 #include "Communication.h"
+#include "esp_log.h"
 
 /**
    @brief Builds a command byte according to the DRV8243 SPI protocol.
@@ -24,12 +25,12 @@ bool DRV8243_Init(void) {
                                DRV8243_REG_DEVICE_ID,
                                id1, id0, st1, st0);
 
-   printf("[DRV1] DEVICE_ID = 0x%02X | STATUS = 0x%02X\n", id1, st1);
-   printf("[DRV0] DEVICE_ID = 0x%02X | STATUS = 0x%02X\n", id0, st0);
+   ESP_LOGI("DRV8243", "[DRV1] DEVICE_ID = 0x%02X | STATUS = 0x%02X", id1, st1);
+   ESP_LOGI("DRV8243", "[DRV0] DEVICE_ID = 0x%02X | STATUS = 0x%02X", id0, st0);
 
    /* If any fault bits set, send global CLR_FLT ------------------------- */
    if ((st1 & 0x3F) || (st0 & 0x3F)) {
-      printf("Clearing fault flags…\n");
+      ESP_LOGW("DRV8243", "Clearing fault flags…");
       const uint8_t clr[6] = {
           0x82,  // HDR1 N = 2
           0xA0,  // HDR2 CLR_FLT = 1
@@ -44,7 +45,7 @@ bool DRV8243_Init(void) {
       DRV8243_DaisyRead(DRV8243_REG_DEVICE_ID,
                         DRV8243_REG_DEVICE_ID,
                         id1, id0, st1, st0);
-      printf("[DRV1] STATUS = 0x%02X | [DRV0] STATUS = 0x%02X\n", st1, st0);
+      ESP_LOGI("DRV8243", "[DRV1] STATUS = 0x%02X | [DRV0] STATUS = 0x%02X", st1, st0);
    }
 
    return ok && (id1 == 0x36) && (id0 == 0x36);
@@ -140,18 +141,18 @@ bool DRV8243_SetupHalfBridge(void) {
    /* Write COMMAND = 0x04 to enable SPI_IN */
    if (!DRV8243_DaisyWrite(DRV8243_REG_COMMAND, 0x90,
                            DRV8243_REG_COMMAND, 0x90)) {
-      printf("[ERROR] COMMAND write failed\n");
+      ESP_LOGE("DRV8243", "COMMAND write failed");
       return false;
    }
 
    /* Write CONFIG4 = 0x54 to both devices */
    if (!DRV8243_DaisyWrite(DRV8243_REG_CONFIG4, 0x54,
                            DRV8243_REG_CONFIG4, 0x54)) {
-      printf("[ERROR] CONFIG4 write failed\n");
+      ESP_LOGE("DRV8243", "CONFIG4 write failed");
       return false;
    }
 
-   printf("[SETUP] Half-bridge control configured via SPI\n");
+   ESP_LOGI("DRV8243", "Half-bridge control configured via SPI");
    return true;
 }
 
@@ -235,6 +236,6 @@ void DRV8243_DumpRegisters(void) {
        spi_val1, spi_val0, status1, status0);
 
    // Exiba os conteúdos reais
-   printf("[DRV1] CMD 0x%02X  CFG4 0x%02X  SPI_IN 0x%02X\n", cmd_val1, cfg_val1, spi_val1);
-   printf("[DRV0] CMD 0x%02X  CFG4 0x%02X  SPI_IN 0x%02X\n", cmd_val0, cfg_val0, spi_val0);
+   ESP_LOGI("DRV8243", "[DRV1] CMD 0x%02X  CFG4 0x%02X  SPI_IN 0x%02X", cmd_val1, cfg_val1, spi_val1);
+   ESP_LOGI("DRV8243", "[DRV0] CMD 0x%02X  CFG4 0x%02X  SPI_IN 0x%02X", cmd_val0, cfg_val0, spi_val0);
 }

@@ -12,6 +12,7 @@
  */
 
 #include "DRV8243Controller.h"
+#include "esp_log.h"
 
 // Static motor ID mapping (0=M1,1=M2 on device0; 2=M1,3=M2 on device1)
 const uint8_t DRV8243Controller::_motorIDs[NUMBER_OUTPUTS] = {0, 1, 2, 3};
@@ -24,10 +25,10 @@ DRV8243Controller::DRV8243Controller() {
 
 bool DRV8243Controller::begin() {
    if (!DRV8243_Init())
-      Serial.println("[ERROR] DRV8243 init failed - check wiring and power");
+      ESP_LOGE("DRV8243", "init failed - check wiring and power");
    else
-      Serial.println("DRV8243 init OK");
-   
+      ESP_LOGI("DRV8243", "init OK");
+
    return DRV8243_SetupHalfBridge();
 }
 
