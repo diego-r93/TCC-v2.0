@@ -37,7 +37,7 @@ class HydraulicPumpController {
    HydraulicPumpController(const char *pumperCode,
                            DRV8243Controller &controller,
                            uint8_t motorIndex,
-                           TickType_t pulseDuration);
+                           TickType_t pulseDuration = 60000);
 
    /**
     * @brief Start the pump via DRV8243 for the configured pulse duration.

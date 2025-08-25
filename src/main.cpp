@@ -51,6 +51,7 @@ vTaskPhSensorRead             1     1     Lê o sensor de pH
 vTaskECSensorRead             1     1     Lê o sensor de condutividade elétrica (EC)
 vTaskPhDataProcess            1     2     Processa os dados do sensor de pH
 vTaskECDataProcess            1     2     Processa os dados do sensor de condutividade elétrica (EC)
+vTaskMqttPublisher            1     3     Publica as mensagens do MQTT (publish) de forma assíncrona
 --------------------------------------------------------------------------------------------------------------------------
 */
 
@@ -102,10 +103,10 @@ struct cn0411_device cn0411_dev;
 DRV8243Controller drvController;
 
 HydraulicPumpController myPumps[] = {
-    {"code01", drvController, 0, 60000},
-    {"code02", drvController, 1, 60000},
-    {"code03", drvController, 2, 60000},
-    {"code04", drvController, 3, 60000},
+    {"esp32s3-07945C#01", drvController, 0},
+    {"esp32s3-07945C#02", drvController, 1},
+    {"esp32s3-07945C#03", drvController, 2},
+    {"esp32s3-07945C#04", drvController, 3},
 };
 
 const int numPumps = sizeof(myPumps) / sizeof(myPumps[0]);
@@ -133,6 +134,9 @@ PubSubClient client(espClient);
 #define MQTT_QUEUE_LENGTH 10
 #define MQTT_TOPIC_MAX_LEN 64
 #define MQTT_PAYLOAD_MAX_LEN 256
+
+#define MQTT_TX_QUEUE_LENGTH 32
+#define MQTT_PUBLISH_TIMEOUT_MS 1000
 
 // MQTT message structure
 struct MqttMessage {
@@ -167,12 +171,21 @@ cSHT3x::Measurements sht35Data;  // Variável global para armazenar os dados do 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-// FreeRTOS configuration
+struct MqttTxMessage {
+   char topic[MQTT_TOPIC_MAX_LEN];
+   uint8_t payload[MQTT_PAYLOAD_MAX_LEN];
+   size_t length;
+   bool retain;
+};
+
+// FreeRTOS Mutexes
 SemaphoreHandle_t xWifiMutex;
 SemaphoreHandle_t xSPIMutex;
 SemaphoreHandle_t xPIDControllerMutex;
 
-QueueHandle_t xMqttQueue = NULL;
+// FreeRTOS Queues
+QueueHandle_t xMqttMessageQueue = NULL;
+QueueHandle_t xMqttTxQueue = NULL;
 
 // FreeRTOS Task Handles
 TaskHandle_t UpdateTaskHandle = NULL;
@@ -191,6 +204,8 @@ TaskHandle_t ECSensorReadTaskHandle = NULL;
 TaskHandle_t PhDataProcessTaskHandle = NULL;
 TaskHandle_t ECDataProcessTaskHandle = NULL;
 
+TaskHandle_t MqttPublisherTaskHandle = NULL;
+
 // FreeRTOS Task Functions
 void vTaskUpdate(void* pvParameters);
 void vTaskCheckWiFi(void* pvParametes);
@@ -207,6 +222,8 @@ void vTaskECSensorRead(void* pvParameters);
 
 void vTaskPhDataProcess(void* pvParameters);
 void vTaskECDataProcess(void* pvParameters);
+
+void vTaskMqttPublisher(void* pvParameters);
 
 String getDateTime(const RtcDateTime& dt) {
    char datestring[26];
@@ -246,19 +263,37 @@ String getFormattedDateTime() {
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
    MqttMessage msg;
-   // copia tópico
+   // Copy topic
    strncpy(msg.topic, topic, MQTT_TOPIC_MAX_LEN - 1);
    msg.topic[MQTT_TOPIC_MAX_LEN - 1] = '\0';
-   // ajusta tamanho e copia payload
+   // Adjust size and copy payload
    msg.length = (length > MQTT_PAYLOAD_MAX_LEN) ? MQTT_PAYLOAD_MAX_LEN : length;
    memcpy(msg.payload, payload, msg.length);
 
    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-   xQueueSendFromISR(xMqttQueue, &msg, &xHigherPriorityTaskWoken);
-   // se a queue acordou task de maior prioridade, fuerza um yield
+   xQueueSendFromISR(xMqttMessageQueue, &msg, &xHigherPriorityTaskWoken);
+   // If the queue was not empty and a higher priority task was woken, yield
    if (xHigherPriorityTaskWoken == pdTRUE) {
       portYIELD_FROM_ISR();
    }
+}
+
+bool mqttEnqueue(const char* topic, const char* payload, TickType_t timeout, bool retain) {
+   if (!topic || !payload) return false;
+
+   MqttTxMessage msg;
+   // copia topic
+   strncpy(msg.topic, topic, MQTT_TOPIC_MAX_LEN - 1);
+   msg.topic[MQTT_TOPIC_MAX_LEN - 1] = '\0';
+
+   // copia payload (texto)
+   size_t len = strnlen(payload, MQTT_PAYLOAD_MAX_LEN - 1);
+   memcpy(msg.payload, payload, len);
+   msg.payload[len] = '\0';
+   msg.length = len;
+   msg.retain = retain;
+
+   return xQueueSendToBack(xMqttTxQueue, &msg, timeout) == pdTRUE;
 }
 
 void restart() {
@@ -605,6 +640,8 @@ void initRtos() {
    xTaskCreatePinnedToCore(vTaskPhDataProcess, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskECDataProcess, "EC Data Process Task", 4096, NULL, 2, &ECDataProcessTaskHandle, APP_CPU_NUM);
 
+   xTaskCreatePinnedToCore(vTaskMqttPublisher, "taskMqttPublisher", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &MqttPublisherTaskHandle, APP_CPU_NUM);
+
    ESP_LOGI("RTOS", "All tasks created successfully");
 }
 
@@ -681,14 +718,17 @@ void setup() {
    xPIDControllerMutex = xSemaphoreCreateMutex();
    configASSERT(xPIDControllerMutex);
 
-   xMqttQueue = xQueueCreate(MQTT_QUEUE_LENGTH, sizeof(MqttMessage));
-   configASSERT(xMqttQueue);
+   xMqttMessageQueue = xQueueCreate(MQTT_QUEUE_LENGTH, sizeof(MqttMessage));
+   configASSERT(xMqttMessageQueue);
+
+   xMqttTxQueue = xQueueCreate(MQTT_TX_QUEUE_LENGTH, sizeof(MqttTxMessage));
+   configASSERT(xMqttTxQueue);
 
    initDS3234();
+   initDRV8243Configuration();
+
    initSHT35();
    initds18b20Sensor();
-
-   initDRV8243Configuration();
    initPhSensor();
    initECSensor();
 
@@ -879,7 +919,7 @@ void vTaskMqttHandler(void* pvParameters) {
 
    while (true) {
       // bloqueia até receber uma mensagem
-      if (xQueueReceive(xMqttQueue, &msg, portMAX_DELAY) != pdTRUE) {
+      if (xQueueReceive(xMqttMessageQueue, &msg, portMAX_DELAY) != pdTRUE) {
          continue;
       }
 
@@ -1022,20 +1062,17 @@ void vTaskds18b20SensorRead(void* pvParameters) {
          continue;
       }
 
-      if (WiFi.status() == WL_CONNECTED && client.connected()) {
-         String ds18b20Topic = String("sensors/") + String(WiFi.getHostname()) + "/ds18b20/temperature";
-         String ds18b20Payload = String(temperatureC);
+      char topic[MQTT_TOPIC_MAX_LEN];
+      char payload[MQTT_PAYLOAD_MAX_LEN];
 
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-            if (client.connected()) {
-               client.publish(ds18b20Topic.c_str(), ds18b20Payload.c_str());
-               xSemaphoreGive(xWifiMutex);
-            } else {
-               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish DS18B20 data.");
-            }
-         }
-      } else {
-         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
+      // Ex.: sensors/<hostname>/ds18b20/temperature
+      snprintf(topic, sizeof(topic), "sensors/%s/ds18b20/temperature", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", temperatureC);
+
+      // 4) Enfileira para a task publicadora (sem checar Wi-Fi/MQTT aqui)
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         // Fila cheia? Você decide: logar, descartar, contar métrica, etc.
+         ESP_LOGW("MQTTQ", "TX queue full; DS18B20 sample dropped.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(DS18B20_SENSOR_READ_DELAY));
@@ -1050,23 +1087,21 @@ void vTaskSHT35SensorRead(void* pvParameters) {
          continue;
       }
 
-      if (WiFi.status() == WL_CONNECTED && client.connected()) {
-         String sht35TempTopic = String("sensors/") + String(WiFi.getHostname()) + "/sht35/temperature";
-         String sht35HumTopic = String("sensors/") + String(WiFi.getHostname()) + "/sht35/humidity";
-         String sht35TempPayload = String(sht35Data.Temperature);
-         String sht35HumPayload = String(sht35Data.Humidity);
+      char topic[MQTT_TOPIC_MAX_LEN];
+      char payload[MQTT_PAYLOAD_MAX_LEN];
 
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-            if (client.connected()) {
-               client.publish(sht35TempTopic.c_str(), sht35TempPayload.c_str());
-               client.publish(sht35HumTopic.c_str(), sht35HumPayload.c_str());
-               xSemaphoreGive(xWifiMutex);
-            } else {
-               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish SHT35 data.");
-            }
-         }
-      } else {
-         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
+      // Temp
+      snprintf(topic, sizeof(topic), "sensors/%s/sht35/temperature", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", sht35Data.Temperature);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; SHT35 temperature dropped.");
+      }
+
+      // Humidity
+      snprintf(topic, sizeof(topic), "sensors/%s/sht35/humidity", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", sht35Data.Humidity);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; SHT35 humidity dropped.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(SHT35_SENSOR_READ_DELAY));
@@ -1081,32 +1116,35 @@ void vTaskPhSensorRead(void* pvParameters) {
       ph = CN0326_CalculatePH();
       temp = CN0326_CalculateTemp();
 
-      if (WiFi.status() == WL_CONNECTED) {
-         String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/ph";
-         String phPayload = String(ph);
+      char topic[MQTT_TOPIC_MAX_LEN];
+      char payload[MQTT_PAYLOAD_MAX_LEN];
 
-         String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/temperature";
-         String tempPayload = String(temp);
+      // pH
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0326/ph", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.2f", ph);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0326 pH dropped.");
+      }
 
-         String internalTempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/internalTemperature";
-         String internalTempPayload = String(internalTemp);
+      // Temperature
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0326/temperature", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", temp);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0326 temperature dropped.");
+      }
 
-         String avddTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0326/avdd";
-         String avddPayload = String(AVDD);
+      // Internal Temperature
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0326/internalTemperature", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", internalTemp);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0326 internal temperature dropped.");
+      }
 
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-            if (client.connected()) {
-               client.publish(phTopic.c_str(), phPayload.c_str());
-               client.publish(tempTopic.c_str(), tempPayload.c_str());
-               client.publish(internalTempTopic.c_str(), internalTempPayload.c_str());
-               client.publish(avddTopic.c_str(), avddPayload.c_str());
-               xSemaphoreGive(xWifiMutex);
-            } else {
-               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish pH data.");
-            }
-         }
-      } else {
-         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
+      // AVDD
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0326/avdd", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.2f", AVDD);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0326 AVDD dropped.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(PH_SENSOR_READ_DELAY));
@@ -1140,40 +1178,49 @@ void vTaskECSensorRead(void* pvParameters) {
          xSemaphoreGive(xSPIMutex);
       }
 
-      String tempTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/temperature";
-      String tempPayload = String(cn0411_dev.temp);
+      char topic[MQTT_TOPIC_MAX_LEN];
+      char payload[MQTT_PAYLOAD_MAX_LEN];
 
-      String vppTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/vpp";
-      String vppPayload = String(cn0411_dev.vpp);
+      // Temperature
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/temperature", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", cn0411_dev.temp);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 temperature dropped.");
+      }
 
-      String rdResTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/rdres";
-      String rdResPayload = String(cn0411_dev.rdres);
+      // vpp
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/vpp", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.2f", cn0411_dev.vpp);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 Vpp dropped.");
+      }
 
-      String condTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/cond";
-      String condPayload = String(1000000 * cn0411_dev.cond);
+      // rdres
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/rdres", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.2f", cn0411_dev.rdres);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 RdRes dropped.");
+      }
 
-      String compensatedCondTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/compensatedCond";
-      String compensatedCondPayload = String(1000000 * cn0411_dev.comp_cond);
+      // cond
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/cond", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", 1000000 * cn0411_dev.cond);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 Cond dropped.");
+      }
 
-      String tdsTopic = String("sensors/") + String(WiFi.getHostname()) + "/cn0411/tds";
-      String tdsPayload = String(1000000 * cn0411_dev.tds);
+      // compensatedCond
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/compensatedCond", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", 1000000 *cn0411_dev.comp_cond);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 Compensated Cond dropped.");
+      }
 
-      if (WiFi.status() == WL_CONNECTED) {
-         if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
-            if (client.connected()) {
-               client.publish(tempTopic.c_str(), tempPayload.c_str());
-               client.publish(vppTopic.c_str(), vppPayload.c_str());
-               client.publish(rdResTopic.c_str(), rdResPayload.c_str());
-               client.publish(condTopic.c_str(), condPayload.c_str());
-               client.publish(compensatedCondTopic.c_str(), compensatedCondPayload.c_str());
-               client.publish(tdsTopic.c_str(), tdsPayload.c_str());
-               xSemaphoreGive(xWifiMutex);
-            } else {
-               ESP_LOGE("MQTT", "MQTT client not connected, cannot publish EC data.");
-            }
-         }
-      } else {
-         ESP_LOGE("WIFI", "No internet connection, skipping data processing.");
+      // tds
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/tds", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.1f", 1000000 * cn0411_dev.tds);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 TDS dropped.");
       }
 
       vTaskDelay(pdMS_TO_TICKS(EC_SENSOR_READ_DELAY));
@@ -1183,5 +1230,32 @@ void vTaskECSensorRead(void* pvParameters) {
 void vTaskECDataProcess(void* pvParameters) {
    while (1) {
       vTaskDelay(pdMS_TO_TICKS(EC_DATA_PROCESS_DELAY));
+   }
+}
+
+void vTaskMqttPublisher(void* pvParameters) {
+   MqttTxMessage msg;
+   while (1) {
+      // Espera mensagem para publicar
+      if (xQueueReceive(xMqttTxQueue, &msg, pdMS_TO_TICKS(200)) != pdTRUE) {
+         vTaskDelay(pdMS_TO_TICKS(10));
+         continue;
+      }
+
+      // Se offline, opcional: descartar ou re-enfileirar.
+      if (WiFi.status() != WL_CONNECTED || !client.connected()) {
+         // aqui, escolha: descartar silenciosamente ou tentar re-enfileirar no começo
+         // xQueueSendToFront(xMqttTxQueue, &msg, 0);
+         continue;
+      }
+
+      // Publica sob controle único (pega o mutex só aqui, não nas tasks de medição)
+      if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(MQTT_PUBLISH_TIMEOUT_MS))) {
+         (void)client.publish(msg.topic, msg.payload, msg.length, msg.retain);
+         xSemaphoreGive(xWifiMutex);
+      } else {
+         // Se não conseguir mutex, tenta devolver para fila (não bloquear)
+         (void)xQueueSendToFront(xMqttTxQueue, &msg, 0);
+      }
    }
 }
