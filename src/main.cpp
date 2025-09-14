@@ -71,7 +71,6 @@ vTaskMqttPublisher            1     3     Publica as mensagens do MQTT (publish)
 struct cn0411_init_params cn0411_init_params = {
     CH_GAIN_RES_20M,
     ADC_SINGLE_CONV,
-    RTD_RES_1K,
     {GAIN_RES_20,
      GAIN_RES_200,
      GAIN_RES_2K,
@@ -550,9 +549,6 @@ void initECSensor() {
       ESP_LOGI("ECSensor", "Tensão DAC: %.5f V", cn0411_dev.read_dac);
    }
 
-   // Define resistor de ganho
-   CN0411_set_gain_res(&cn0411_dev, CH_GAIN_RES_2K);
-
    // Define frequência PWM e duty cycle
    CN0411_pwm_freq(PWM_FREQ_94, pwm_duty);
 }
@@ -751,6 +747,13 @@ void loop() {
    vTaskDelete(NULL);
 }
 
+/**
+ * @brief Monitors WiFi connection and attempts reconnection if disconnected.
+ * @details      If WiFi is lost, retries up to `max_retries`, each with a
+ *               `timeout_ms` window. Uses `xWifiMutex` to guard WiFi.begin()
+ *               and WiFi.disconnect(). On successful reconnection, restarts
+ *               mDNS with the current hostname.
+ */
 void vTaskCheckWiFi(void* pvParameters) {
    const uint32_t timeout_ms = 15000;  // igual ao initWiFi
    const uint8_t max_retries = 3;      // igual ao initWiFi
@@ -818,6 +821,11 @@ void vTaskCheckWiFi(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Periodically updates the RTC with time from NTP server.
+ * @details      Runs every NTP_DELAY milliseconds. If WiFi is connected, it
+ *               fetches the current time from the NTP server and updates the RTC.
+ */
 void vTaskNTP(void* pvParameters) {
    while (1) {
       if ((WiFi.status() == WL_CONNECTED) && ntp.update()) {
@@ -849,9 +857,11 @@ void vTaskNTP(void* pvParameters) {
    }
 }
 
-// -----------------------------------------------------------------------------
-// Task 1: Loop MQTT (alta prioridade, sem bloqueio de mutex, a cada 10 ms)
-// -----------------------------------------------------------------------------
+/**
+ * @brief Continuously processes MQTT client loop.
+ * @details      Runs every MQTT_LOOP_DELAY milliseconds. If the MQTT client
+ *               is not connected, it will not process the loop until it reconnects.
+ */
 void vTaskMqttLoop(void* pvParameters) {
    while (true) {
       // Se não está conectado, não processa loop até reconectar
@@ -868,9 +878,12 @@ void vTaskMqttLoop(void* pvParameters) {
    }
 }
 
-// -----------------------------------------------------------------------------
-// Task 2: Reconnect MQTT (prioridade um pouco menor, checa a cada 1 s)
-// -----------------------------------------------------------------------------
+/**
+ * @brief Monitors MQTT connection and attempts reconnection if disconnected.
+ * @details      If MQTT is disconnected, and WiFi is connected, it will try to
+ *               reconnect the MQTT client. Uses `xWifiMutex` to guard
+ *               `client.connect()` and `client.disconnect()`.
+ */
 void vTaskMqttReconnect(void* parameter) {
    const char* clientId = WiFi.getHostname();
 
@@ -911,9 +924,11 @@ void vTaskMqttReconnect(void* parameter) {
    }
 }
 
-// -----------------------------------------------------------------------------
-// Task de tratamento de mensagens
-// -----------------------------------------------------------------------------
+/**
+ * @brief Handles incoming MQTT messages from the queue.
+ * @details      Waits for messages on `xMqttMessageQueue`. Upon receiving a
+ *               message, it processes the message based on its topic.
+ */
 void vTaskMqttHandler(void* pvParameters) {
    MqttMessage msg;
 
@@ -1003,6 +1018,12 @@ void vTaskMqttHandler(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Periodically fetches and updates pump configuration from the cloud.
+ * @details      Runs every UPDATE_DELAY milliseconds. If WiFi is connected, it
+ *               fetches the configuration from the cloud and updates the pump's
+ *               settings accordingly. Uses `xWifiMutex` to guard cloud operations.
+ */
 void vTaskUpdate(void* pvParameters) {
    HydraulicPumpController* pump = (HydraulicPumpController*)pvParameters;
 
@@ -1028,6 +1049,11 @@ void vTaskUpdate(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Monitors the RTC and turns on the pump at scheduled drive times.
+ * @details      Runs every TURN_ON_PUMP_DELAY milliseconds. It checks the current RTC time
+ *               against the pump's scheduled drive times and activates the pump if a match is found.
+ */
 void vTaskTurnOnPump(void* pvParameters) {
    HydraulicPumpController* pump = (HydraulicPumpController*)pvParameters;
 
@@ -1048,6 +1074,12 @@ void vTaskTurnOnPump(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Periodically reads temperature from DS18B20 sensor and enqueues the data for MQTT publishing.
+ * @details      Runs every DS18B20_SENSOR_READ_DELAY milliseconds. It reads the temperature
+ *               from the DS18B20 sensor, formats the data, and enqueues it to the MQTT
+ *               transmission queue. If the sensor read fails, it logs an error and retries.
+ */
 void vTaskds18b20SensorRead(void* pvParameters) {
    float temperatureC;
 
@@ -1079,6 +1111,12 @@ void vTaskds18b20SensorRead(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Periodically reads temperature and humidity from SHT35 sensor and enqueues the data for MQTT publishing.
+ * @details      Runs every SHT35_SENSOR_READ_DELAY milliseconds. It reads the temperature
+ *               and humidity from the SHT35 sensor, formats the data, and enqueues it to the MQTT
+ *               transmission queue. If the sensor read fails, it logs an error and retries.
+ */
 void vTaskSHT35SensorRead(void* pvParameters) {
    while (1) {
       if (!gSht3x.getTemperatureHumidity(sht35Data)) {
@@ -1108,6 +1146,13 @@ void vTaskSHT35SensorRead(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Periodically reads pH and related parameters from CN0326 sensor and enqueues the data for MQTT publishing.
+ * @details      Runs every PH_SENSOR_READ_DELAY milliseconds. It reads the pH, temperature,
+ *               internal temperature, and AVDD from the CN0326 sensor, formats the data,
+ *               and enqueues it to the MQTT transmission queue. If the sensor read fails,
+ *               it logs an error and retries.
+ */
 void vTaskPhSensorRead(void* pvParameters) {
    float ph, temp, internalTemp, AVDD;
    while (1) {
@@ -1151,12 +1196,25 @@ void vTaskPhSensorRead(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Placeholder task for processing pH data.
+ * @details      Currently, this task does not perform any operations. It runs
+ *               every PH_DATA_PROCESS_DELAY milliseconds and can be expanded
+ *               in the future to include data processing logic as needed.
+ */
 void vTaskPhDataProcess(void* pvParameters) {
    while (1) {
       vTaskDelay(pdMS_TO_TICKS(PH_DATA_PROCESS_DELAY));
    }
 }
 
+/**
+ * @brief Periodically reads conductivity and related parameters from CN0411 sensor and enqueues the data for MQTT publishing.
+ * @details      Runs every EC_SENSOR_READ_DELAY milliseconds. It reads the temperature,
+ *               Vpp, RdRes, OffsetRes, Conductivity, Compensated Conductivity, and TDS
+ *               from the CN0411 sensor, formats the data, and enqueues it to the MQTT
+ *               transmission queue. If the sensor read fails, it logs an error and retries.
+ */
 void vTaskECSensorRead(void* pvParameters) {
    while (true) {
       // PWM principal com 50% duty
@@ -1202,6 +1260,13 @@ void vTaskECSensorRead(void* pvParameters) {
          ESP_LOGW("MQTTQ", "TX queue full; CN0411 RdRes dropped.");
       }
 
+      // offset_res
+      snprintf(topic, sizeof(topic), "sensors/%s/cn0411/offset_res", WiFi.getHostname());
+      snprintf(payload, sizeof(payload), "%.2f", cn0411_dev.offset_res);
+      if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
+         ESP_LOGW("MQTTQ", "TX queue full; CN0411 Offset Res dropped.");
+      }
+
       // cond
       snprintf(topic, sizeof(topic), "sensors/%s/cn0411/cond", WiFi.getHostname());
       snprintf(payload, sizeof(payload), "%.1f", 1000000 * cn0411_dev.cond);
@@ -1211,7 +1276,7 @@ void vTaskECSensorRead(void* pvParameters) {
 
       // compensatedCond
       snprintf(topic, sizeof(topic), "sensors/%s/cn0411/compensatedCond", WiFi.getHostname());
-      snprintf(payload, sizeof(payload), "%.1f", 1000000 *cn0411_dev.comp_cond);
+      snprintf(payload, sizeof(payload), "%.1f", 1000000 * cn0411_dev.comp_cond);
       if (!mqttEnqueue(topic, payload, pdMS_TO_TICKS(10), /*retain=*/false)) {
          ESP_LOGW("MQTTQ", "TX queue full; CN0411 Compensated Cond dropped.");
       }
@@ -1227,12 +1292,25 @@ void vTaskECSensorRead(void* pvParameters) {
    }
 }
 
+/**
+ * @brief Placeholder task for processing EC data.
+ * @details      Currently, this task does not perform any operations. It runs
+ *               every EC_DATA_PROCESS_DELAY milliseconds and can be expanded
+ *               in the future to include data processing logic as needed.
+ */
 void vTaskECDataProcess(void* pvParameters) {
    while (1) {
       vTaskDelay(pdMS_TO_TICKS(EC_DATA_PROCESS_DELAY));
    }
 }
 
+/**
+ * @brief Publishes MQTT messages from the transmission queue.
+ * @details      Continuously waits for messages on `xMqttTxQueue`. Upon
+ *               receiving a message, it checks WiFi and MQTT connection status,
+ *               then publishes the message using the MQTT client. Uses
+ *               `xWifiMutex` to guard the publish operation.
+ */
 void vTaskMqttPublisher(void* pvParameters) {
    MqttTxMessage msg;
    while (1) {

@@ -396,8 +396,8 @@ int32_t CN0411_read_temp(struct cn0411_device *cn0411_dev) {
    float current = v_r / PTC_REF_RES;
 
    // Calcula a tensão sobre o NTC (diferença de potencial até VREF)
-   // float v_ntc = VREF - v_r;
-   float v_ntc = (float)(ch6_data)*VREF / 0xFFFFFF;
+   float v_ntc = VREF - v_r;
+   // float v_ntc = (float)(ch6_data)*VREF / 0xFFFFFF;
 
    // Calcula a resistência do NTC
    float resistance = v_ntc / current;
@@ -569,9 +569,19 @@ int32_t CN0411_compute_cond(struct cn0411_device *cn0411_dev) {
  */
 int32_t CN0411_compute_off_res(struct cn0411_device *cn0411_dev) {
    int32_t ret;
-   float ipp;
+   float ratio;
 
    ret = CN0411_premeasurement(cn0411_dev);
+   if (ret == CN0411_FAILURE)
+      return ret;
+
+   // força faixa de 20 Ω
+   ret = CN0411_set_gain_res(cn0411_dev, CH_GAIN_RES_20);
+   if (ret == CN0411_FAILURE)
+      return ret;
+
+   // lê o nó correspondente ao resistor de 20 Ω
+   ret = CN0411_read_R20S(cn0411_dev);
    if (ret == CN0411_FAILURE)
       return ret;
 
@@ -579,8 +589,21 @@ int32_t CN0411_compute_off_res(struct cn0411_device *cn0411_dev) {
    if (ret == CN0411_FAILURE)
       return ret;
 
-   ipp = (2 * cn0411_dev->v_exc - cn0411_dev->vpp) / cn0411_dev->r_gain[cn0411_dev->ch_gain];
-   cn0411_dev->offset_res = cn0411_dev->vpp / ipp - PREC_REF_RES;
+   ratio = cn0411_dev->read_v_r20s / cn0411_dev->v_exc;
+
+   if (ratio >= 0.4 && ratio <= 0.6) {
+      // jumper = 20 Ω → calcula offset incluindo mux/switch/trilha
+      ret = CN0411_read_vpp(cn0411_dev);
+      if (ret == CN0411_FAILURE)
+         return ret;
+
+      // vpp já é (V+ + V-) conforme seu read_vpp; use direto
+      cn0411_dev->offset_res =
+          20 * ((cn0411_dev->v_exc - cn0411_dev->vpp) / cn0411_dev->vpp) - cn0411_dev->r_gain[cn0411_dev->ch_gain];
+   } else {
+      // não bateu ~metade → sem jumper de 20 Ω
+      cn0411_dev->offset_res = 0;
+   }
 
    return ret;
 }
@@ -737,6 +760,7 @@ int32_t CN0411_premeasurement(struct cn0411_device *cn0411_dev) {
    int32_t ret;
 
    // cn0411_dev->ch_gain = CH_GAIN_RES_20M;
+
    // ret = CN0411_read_vdac(cn0411_dev);
    // if (ret == CN0411_FAILURE)
    //    return ret;
@@ -745,6 +769,8 @@ int32_t CN0411_premeasurement(struct cn0411_device *cn0411_dev) {
    ret = CN0411_DAC_set_value(cn0411_dev, cn0411_dev->v_exc);
    if (ret == CN0411_FAILURE)
       return ret;
+
+   CN0411_set_gain_res(cn0411_dev, CH_GAIN_RES_2K);
 
    // while (cn0411_dev->ch_gain >= 1) {
    //    ret = CN0411_ADC_set_io1(cn0411_dev, cn0411_dev->ch_gain);
@@ -831,7 +857,6 @@ int32_t CN0411_init(struct cn0411_device *cn0411_dev,
    /* Initialize Device Structure */
    cn0411_dev->ch_gain = cn0411_init_params.init_ch_gain;
    cn0411_dev->conv_type = cn0411_init_params.init_conv_type;
-   cn0411_dev->rtd_res = cn0411_init_params.init_rtd_res;
    cn0411_dev->r_gain[CH_GAIN_RES_20] =
        cn0411_init_params.init_r_gain[CH_GAIN_RES_20];
    cn0411_dev->r_gain[CH_GAIN_RES_200] =

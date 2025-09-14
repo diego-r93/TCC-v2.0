@@ -5,7 +5,7 @@
 
 typedef uint32_t timer_ticks_t;
 
-void timer_start(void);
+// void timer_start(void);
 void timer_sleep(uint32_t ticks);
 void timer_sleep_5uS(uint32_t ticks);
 

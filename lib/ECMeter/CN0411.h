@@ -116,12 +116,8 @@
 #define EXC_DEFAULT_VAL 0
 #define RES_GAIN_DEFAULT_CH 6
 #define VREFIN (0.250 * 4.02)
-#define OFFSET_RES_INIT 0
+#define OFFSET_RES_INIT 7 // 5Ω (TMUX1208PWR) + 2Ω (TMUX1136DGSR)
 #define RDRES_DEFAULT_VAL 0
-#define PREC_REF_RES 1500
-#define RTD_REF_RES 4020
-#define RTD_RES_100 100
-#define RTD_RES_1K 1000
 #define PTC_REF_RES 10000
 #define TCAL 25
 #define CELL_CONST_LOW 0.1
@@ -132,8 +128,6 @@
 #define TEMP_COEFF_KCL 0.0188
 #define TEMP_COEFF_NACL 0.0214
 #define VREF 2.5
-#define A_CONST (3.9083 * pow(10, -3))
-#define B_CONST (-5.775 * pow(10, -7))
 
 /******************************************************************************/
 /************************** Variable Declaration ******************************/
@@ -152,7 +146,6 @@ struct init_solution {
 struct cn0411_device {
    uint8_t ch_gain;
    uint8_t conv_type;
-   uint16_t rtd_res;
    uint32_t r_gain[7];
    float offset_res;
    float v_dac;
@@ -177,7 +170,6 @@ struct cn0411_device {
 struct cn0411_init_params {
    uint8_t init_ch_gain;
    uint8_t init_conv_type;
-   uint16_t init_rtd_res;
    uint32_t init_r_gain[7];
    float init_offset_res;
    float init_v_dac;

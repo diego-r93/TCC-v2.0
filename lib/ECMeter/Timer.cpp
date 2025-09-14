@@ -3,20 +3,20 @@
 #include "CN0411.h"
 
 // Definição do timer
-hw_timer_t *timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+// hw_timer_t *timer = NULL;
+// portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
-void IRAM_ATTR onTimer() {
-   CN0411_pwm_gen();  // Substitui a ISR TIMER2_COMPA_vect
-}
+// void IRAM_ATTR onTimer() {
+//    CN0411_pwm_gen();  // Substitui a ISR TIMER2_COMPA_vect
+// }
 
-// Inicia o timer para gerar interrupção a 2kHz
-void timer_start() {
-   timer = timerBegin(0, 80, true);  // Timer 0, Prescaler 80 → 1 MHz (1 µs por tick)
-   timerAttachInterrupt(timer, &onTimer, true);
-   timerAlarmWrite(timer, 500, true);  // 500 µs = 2 kHz
-   timerAlarmEnable(timer);
-}
+// // Inicia o timer para gerar interrupção a 2kHz
+// void timer_start() {
+//    timer = timerBegin(0, 80, true);  // Timer 0, Prescaler 80 → 1 MHz (1 µs por tick)
+//    timerAttachInterrupt(timer, &onTimer, true);
+//    timerAlarmWrite(timer, 500, true);  // 500 µs = 2 kHz
+//    timerAlarmEnable(timer);
+// }
 
 // Função de sleep padrão
 void timer_sleep(uint32_t ticks) {
