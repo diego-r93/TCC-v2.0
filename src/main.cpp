@@ -32,6 +32,7 @@
 #include "freertos/timers.h"
 #include "hydraulicPumpController.h"
 #include "mongoDbAtlas.h"
+#include "mongoDbLocal.h"
 #include "mqttCredentials.h"
 #include "wifiCredentials.h"
 
@@ -262,18 +263,19 @@ String getFormattedDateTime() {
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
    MqttMessage msg;
+
    // Copy topic
-   strncpy(msg.topic, topic, MQTT_TOPIC_MAX_LEN - 1);
-   msg.topic[MQTT_TOPIC_MAX_LEN - 1] = '\0';
-   // Adjust size and copy payload
+   size_t topicLen = strnlen(topic, MQTT_TOPIC_MAX_LEN - 1);
+   memcpy(msg.topic, topic, topicLen);
+   msg.topic[topicLen] = '\0';
+
+   // Copy payload
    msg.length = (length > MQTT_PAYLOAD_MAX_LEN) ? MQTT_PAYLOAD_MAX_LEN : length;
    memcpy(msg.payload, payload, msg.length);
 
-   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-   xQueueSendFromISR(xMqttMessageQueue, &msg, &xHigherPriorityTaskWoken);
-   // If the queue was not empty and a higher priority task was woken, yield
-   if (xHigherPriorityTaskWoken == pdTRUE) {
-      portYIELD_FROM_ISR();
+   // Try to enqueue the message, if the queue is full, drop the message and log a warning
+   if (xQueueSend(xMqttMessageQueue, &msg, pdMS_TO_TICKS(2)) != pdTRUE) {
+      ESP_LOGW("MQTT", "⚠️ Queue full, message from topic '%s' dropped", msg.topic);
    }
 }
 
@@ -302,7 +304,7 @@ void restart() {
    ESP.restart();
 }
 
-void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
+bool loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    JsonDocument response;
    JsonDocument body;  // Pode ser pequeno pois é o que será enviado
    JsonDocument doc;
@@ -330,7 +332,7 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
 
    if (!beginOK) {
       ESP_LOGE("HTTPS", "❌ HTTPS begin() failed");
-      return;
+      return false;
    }
 
    https.addHeader("apiKey", apiKey);
@@ -342,7 +344,7 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
    if (httpResponseCode <= 0) {
       ESP_LOGE("HTTPS", "❌ POST failed. Error code: %d", httpResponseCode);
       https.end();  // Libera conexão
-      return;
+      return false;
    } else {
       ESP_LOGI("HTTPS", "✅ POST successful. Response code: %d", httpResponseCode);
    }
@@ -354,12 +356,125 @@ void loadConfigurationCloud(const char* pumperCode, JsonDocument* jsonData) {
 
    if (error) {
       ESP_LOGE("HTTPS", "❌ Failed to parse JSON response.");
-      return;
+      return false;
+   }
+
+   // Validação mínima do documento retornado
+   if (!response["document"].is<JsonObject>()) {
+      ESP_LOGE("HTTPS", "❌ Response has no valid 'document' object.");
+      return false;
+   }
+
+   JsonObject docOut = response["document"].as<JsonObject>();
+
+   // driveTimes deve ser array
+   if (!docOut["driveTimes"].is<JsonArray>()) {
+      ESP_LOGE("HTTPS", "❌ 'document.driveTimes' missing or not an array.");
+      return false;
+   }
+
+   // pulseDuration pode ser inteiro; se não souber o tipo exato, teste por null
+   if (docOut["pulseDuration"].isNull()) {
+      ESP_LOGE("HTTPS", "❌ 'document.pulseDuration' missing.");
+      return false;
+   }
+
+   // (opcional) alerta se vier vazio
+   if (docOut["driveTimes"].as<JsonArray>().size() == 0) {
+      ESP_LOGW("HTTPS", "⚠️ 'document.driveTimes' is empty.");
    }
 
    // serializeJsonPretty(response["document"], Serial);
 
    *jsonData = response["document"];
+   return true;
+}
+
+bool loadConfigurationLocal(const char* pumperCode, JsonDocument* jsonData) {
+   // Monta o corpo exatamente como você fazia para o Atlas
+   JsonDocument body;
+   JsonDocument filter;
+   JsonObject obj = filter.to<JsonObject>();
+   obj["pumperCode"] = pumperCode;
+
+   body["dataSource"] = "Tomatoes";
+   body["database"] = "tomatoes-database";
+   body["collection"] = "boards";
+   body["filter"] = obj;
+
+   String json;
+   serializeJson(body, json);
+
+   // Monta URL http://RPI_HOST:RPI_PORT/RPI_PATH
+   String url = String("http://") + RPI_HOST + ":" + String(RPI_PORT) + String(RPI_PATH);
+
+   WiFiClient client;  // <<< HTTP (sem TLS). Se tiver HTTPS no nginx, troque para WiFiClientSecure e setCACert.
+   HTTPClient http;
+   http.setTimeout(5000);  // evita travar
+
+   if (!http.begin(client, url)) {
+      ESP_LOGE("HTTP", "❌ HTTP begin() failed");
+      return false;
+   }
+
+   http.addHeader("Content-Type", "application/json");
+   http.addHeader("Accept", "application/json");
+   if (strlen(LOCAL_TOKEN) > 0) {
+      http.addHeader("Authorization", LOCAL_TOKEN);  // opcional, se você exigir auth no backend
+   }
+
+   int code = http.POST(json);
+   if (code <= 0) {
+      ESP_LOGE("HTTP", "❌ POST failed. Error code: %d", code);
+      http.end();
+      return false;
+   } else {
+      ESP_LOGI("HTTP", "✅ POST successful. Response code: %d", code);
+   }
+
+   String payload = http.getString();
+   http.end();
+
+   // Parse
+   JsonDocument response;
+   DeserializationError err = deserializeJson(response, payload);
+   if (err) {
+      ESP_LOGE("HTTP", "❌ Failed to parse JSON response.");
+      return false;
+   }
+
+   // Aceita dois formatos:
+   // 1) { "document": {...} }   (igual ao Data API)
+   // 2) { ...objeto... }        (objeto direto)
+   JsonObject docOut;
+
+   if (response["document"].is<JsonObject>()) {
+      docOut = response["document"].as<JsonObject>();
+   } else if (response.is<JsonObject>()) {
+      docOut = response.as<JsonObject>();
+   } else if (response["document"].is<JsonArray>() && response["document"].as<JsonArray>().size() > 0) {
+      // fallback: às vezes APIs retornam array de documentos
+      docOut = response["document"][0].as<JsonObject>();
+   } else {
+      ESP_LOGE("HTTP", "❌ Response has no valid document object.");
+      return false;
+   }
+
+   // Validações mínimas (iguais às suas)
+   if (!docOut["driveTimes"].is<JsonArray>()) {
+      ESP_LOGE("HTTP", "❌ 'driveTimes' missing or not an array.");
+      return false;
+   }
+   if (docOut["pulseDuration"].isNull()) {
+      ESP_LOGE("HTTP", "❌ 'pulseDuration' missing.");
+      return false;
+   }
+   if (docOut["driveTimes"].as<JsonArray>().size() == 0) {
+      ESP_LOGW("HTTP", "⚠️ 'driveTimes' is empty.");
+   }
+
+   *jsonData = docOut;
+   return true;
 }
 
 void updateConfiguration(JsonDocument inputDocument, std::set<String>* inputDriveTime, uint32_t* inputDuration) {
@@ -616,16 +731,16 @@ void initDRV8243Configuration() {
    }
 }
 
-void initRtos() {
+void initRtos(HydraulicPumpController* pumps, int pumpsCount) {
    xTaskCreatePinnedToCore(vTaskCheckWiFi, "taskCheckWiFi", configMINIMAL_STACK_SIZE + 4096, NULL, 4, &CheckWiFiTaskHandle, PRO_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskMqttLoop, "taskMqttLoop", configMINIMAL_STACK_SIZE + 2048, NULL, 5, &MqttLoopTaskHandle, PRO_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 2048, NULL, 3, &MqttReconnectTaskHandle, PRO_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskMqttLoop, "taskMqttLoop", configMINIMAL_STACK_SIZE + 4096, NULL, 5, &MqttLoopTaskHandle, PRO_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &MqttReconnectTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskMqttHandler, "taskMqttHandler", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &TaskMqttHandlerHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskNTP, "taskNTP", configMINIMAL_STACK_SIZE + 2048, NULL, 1, &NTPTaskHandle, PRO_CPU_NUM);
 
-   for (int indice = 0; indice < numPumps; indice++) {
-      xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &myPumps[indice], 3, &UpdateTaskHandle, APP_CPU_NUM);
-      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &myPumps[indice], 4, &TurnOnPumpTaskHandle, APP_CPU_NUM);
+   for (int indice = 0; indice < pumpsCount; indice++) {
+      xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &pumps[indice], 3, &UpdateTaskHandle, APP_CPU_NUM);
+      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &pumps[indice], 4, &TurnOnPumpTaskHandle, APP_CPU_NUM);
    }
 
    xTaskCreatePinnedToCore(vTaskds18b20SensorRead, "taskds18b20SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &ds18b20SensorReadTaskHandle, APP_CPU_NUM);
@@ -729,7 +844,7 @@ void setup() {
    initECSensor();
 
    initServer();
-   initRtos();
+   initRtos(myPumps, numPumps);
 
    ESP_LOGI("MEM", "Total heap: %d\n", ESP.getHeapSize());
    ESP_LOGI("MEM", "Free heap: %d\n", ESP.getFreeHeap());
@@ -755,8 +870,8 @@ void loop() {
  *               mDNS with the current hostname.
  */
 void vTaskCheckWiFi(void* pvParameters) {
-   const uint32_t timeout_ms = 15000;  // igual ao initWiFi
-   const uint8_t max_retries = 3;      // igual ao initWiFi
+   const uint32_t timeout_ms = 15000;
+   const uint8_t max_retries = 3;
 
    while (1) {
       if (WiFi.status() != WL_CONNECTED) {
@@ -788,7 +903,7 @@ void vTaskCheckWiFi(void* pvParameters) {
 
                // Desassociar/zerar sessão (curto e com mutex)
                if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(WIFI_TIMEOUT))) {
-                  WiFi.disconnect(true /* wifioff */);  // igual ao seu initWiFi
+                  WiFi.disconnect(true /*wifioff*/, true /*eraseAP*/);
                   xSemaphoreGive(xWifiMutex);
                } else {
                   ESP_LOGW("WIFI", "Timeout ao pegar xWifiMutex para WiFi.disconnect()");
@@ -1000,17 +1115,27 @@ void vTaskMqttHandler(void* pvParameters) {
                port["state"] = myPumps[indice].getPumpState();
                port["pulseDuration"] = myPumps[indice].getPulseDuration();
 
-               // Adicionar os driveTimes ao JSON
+               // --- DriveTimes em memória ---
                JsonArray driveTimesArray = port["driveTimes"].to<JsonArray>();
                for (const String& time : *(myPumps[indice].getDriveTimesPointer())) {
                   driveTimesArray.add(time);
+               }
+
+               // --- DriveTimes do arquivo da bomba correspondente ---
+               std::set<String> fileDriveTimes;
+               String file = String("/") + myPumps[indice].getCode() + ".bin";
+               if (SPIFFS.exists(file)) {
+                  loadDriveTimes(fileDriveTimes, file);
+               }
+               JsonArray fileArray = port["driveTimesFromFile"].to<JsonArray>();
+               for (const String& time : fileDriveTimes) {
+                  fileArray.add(time);
                }
             }
 
             String jsonTopic = String("devices/") + String(WiFi.getHostname());
             String jsonStr;
             serializeJson(jsonPayload, jsonStr);
-            // client.publish(jsonTopic.c_str(), jsonStr.c_str());
             client.publish("devices", jsonStr.c_str());
          }
       }
@@ -1031,18 +1156,38 @@ void vTaskUpdate(void* pvParameters) {
       if (WiFi.status() == WL_CONNECTED) {
          if (xSemaphoreTake(xWifiMutex, pdMS_TO_TICKS(UPDATE_TIMEOUT))) {
             ESP_LOGI("WIFI", "🔐 WiFi mutex acquired for update.");
-            loadConfigurationCloud(pump->getCode(), pump->getJsonDataPointer());
-            updateConfiguration(pump->getJsonData(), pump->getDriveTimesPointer(), pump->pulseDurationPointer);
 
+            // bool ret = loadConfigurationCloud(pump->getCode(), pump->getJsonDataPointer());
+            bool ret = loadConfigurationLocal(pump->getCode(), pump->getJsonDataPointer());
             xSemaphoreGive(xWifiMutex);
-            ESP_LOGI("WIFI", "🔓 WiFi mutex released after update.");
+            ESP_LOGI("WIFI", "🔓 WiFi mutex released after load configuration.");
 
-            saveDriveTimes(*(pump->getDriveTimesPointer()), "/driveTimes.bin");
+            if (ret) {
+               updateConfiguration(pump->getJsonData(), pump->getDriveTimesPointer(), pump->pulseDurationPointer);
+
+               String fname = String("/") + pump->getCode() + ".bin";
+               saveDriveTimes(*(pump->getDriveTimesPointer()), fname);
+            }
+
          } else {
             ESP_LOGE("WIFI", "⚠️ Timeout while trying to acquire xWifiMutex in vTaskUpdate.");
          }
       } else {
          ESP_LOGE("WIFI", "⚠️ No internet connection, using stored drive times.");
+
+         String fname = String("/") + pump->getCode() + ".bin";
+         if (SPIFFS.exists(fname)) {
+            std::set<String> fileTimes;
+            loadDriveTimes(fileTimes, fname);
+            if (!fileTimes.empty()) {
+               *(pump->getDriveTimesPointer()) = fileTimes;
+               ESP_LOGI("UPDATE", "Loading driveTimes from %s (size=%u)",
+                        fname.c_str(), (unsigned)fileTimes.size());
+            }
+         } else {
+            ESP_LOGW("UPDATE", "File not found for pump %s -> %s",
+                     pump->getCode(), fname.c_str());
+         }
       }
 
       vTaskDelay(pdMS_TO_TICKS(UPDATE_DELAY));
