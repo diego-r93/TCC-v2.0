@@ -102,14 +102,13 @@ struct cn0411_device cn0411_dev;
 // Motors configuration
 DRV8243Controller drvController;
 
-HydraulicPumpController myPumps[] = {
-    {"esp32s3-07945C#01", drvController, 0},
-    {"esp32s3-07945C#02", drvController, 1},
-    {"esp32s3-07945C#03", drvController, 2},
-    {"esp32s3-07945C#04", drvController, 3},
+// Pump set structure
+struct PumpSet {
+   HydraulicPumpController* items;  // array of controllers
+   int count;                       // number of controllers
 };
 
-const int numPumps = sizeof(myPumps) / sizeof(myPumps[0]);
+#define DEFAULT_PULSE_DURATION 60000  // 1 minuto
 
 // WiFi configuration
 #define CHECK_WIFI_DELAY 500  // 500 ms
@@ -731,16 +730,46 @@ void initDRV8243Configuration() {
    }
 }
 
-void initRtos(HydraulicPumpController* pumps, int pumpsCount) {
+PumpSet* buildPumpSet(DRV8243Controller& drvController,
+                      const char* mdnsBaseId,
+                      TickType_t defaultPulseDuration) {
+   // Mantém os códigos vivos (construtor recebe const char*)
+   static char codeBuf[NUMBER_OUTPUTS][32];
+   for (int i = 0; i < NUMBER_OUTPUTS; ++i) {
+      snprintf(codeBuf[i], sizeof(codeBuf[i]), "%s#%02d", mdnsBaseId, i + 1);
+   }
+
+   // Aloca memória crua para NUMBER_OUTPUTS objetos
+   void* raw = operator new[](NUMBER_OUTPUTS * sizeof(HydraulicPumpController));
+   HydraulicPumpController* pumps =
+       reinterpret_cast<HydraulicPumpController*>(raw);
+
+   // Constrói cada objeto no lugar (compatível com seu construtor de 4 args)
+   for (int i = 0; i < NUMBER_OUTPUTS; ++i) {
+      new (&pumps[i]) HydraulicPumpController(
+          codeBuf[i],     // const char* pumperCode  (lifetime estático)
+          drvController,  // DRV8243Controller&
+          static_cast<uint8_t>(i),
+          defaultPulseDuration  // TickType_t
+      );
+   }
+
+   PumpSet* set = new PumpSet;
+   set->items = pumps;
+   set->count = NUMBER_OUTPUTS;
+   return set;
+}
+
+void initRtos(PumpSet* set) {
    xTaskCreatePinnedToCore(vTaskCheckWiFi, "taskCheckWiFi", configMINIMAL_STACK_SIZE + 4096, NULL, 4, &CheckWiFiTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskMqttLoop, "taskMqttLoop", configMINIMAL_STACK_SIZE + 4096, NULL, 5, &MqttLoopTaskHandle, PRO_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskMqttReconnect, "taskMqttReconnect", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &MqttReconnectTaskHandle, PRO_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskMqttHandler, "taskMqttHandler", configMINIMAL_STACK_SIZE + 4096, NULL, 3, &TaskMqttHandlerHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskMqttHandler, "taskMqttHandler", configMINIMAL_STACK_SIZE + 4096, set, 3, &TaskMqttHandlerHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskNTP, "taskNTP", configMINIMAL_STACK_SIZE + 2048, NULL, 1, &NTPTaskHandle, PRO_CPU_NUM);
 
-   for (int indice = 0; indice < pumpsCount; indice++) {
-      xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &pumps[indice], 3, &UpdateTaskHandle, APP_CPU_NUM);
-      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &pumps[indice], 4, &TurnOnPumpTaskHandle, APP_CPU_NUM);
+   for (int indice = 0; indice < set->count; indice++) {
+      xTaskCreatePinnedToCore(vTaskUpdate, "taskUpdate", configMINIMAL_STACK_SIZE + 8192, &set->items[indice], 3, &UpdateTaskHandle, APP_CPU_NUM);
+      xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 2048, &set->items[indice], 4, &TurnOnPumpTaskHandle, APP_CPU_NUM);
    }
 
    xTaskCreatePinnedToCore(vTaskds18b20SensorRead, "taskds18b20SensorRead", configMINIMAL_STACK_SIZE + 4096, NULL, 1, &ds18b20SensorReadTaskHandle, APP_CPU_NUM);
@@ -844,7 +873,7 @@ void setup() {
    initECSensor();
 
    initServer();
-   initRtos(myPumps, numPumps);
+   initRtos(buildPumpSet(drvController, WiFi.getHostname(), DEFAULT_PULSE_DURATION));
 
    ESP_LOGI("MEM", "Total heap: %d\n", ESP.getHeapSize());
    ESP_LOGI("MEM", "Free heap: %d\n", ESP.getFreeHeap());
@@ -1045,7 +1074,13 @@ void vTaskMqttReconnect(void* parameter) {
  *               message, it processes the message based on its topic.
  */
 void vTaskMqttHandler(void* pvParameters) {
+   PumpSet* set = static_cast<PumpSet*>(pvParameters);
    MqttMessage msg;
+
+   if (set == NULL) {
+      ESP_LOGE("MQTT", "PumpSet context is NULL. Deleting task.");
+      vTaskDelete(NULL);
+   }
 
    while (true) {
       // bloqueia até receber uma mensagem
@@ -1074,7 +1109,7 @@ void vTaskMqttHandler(void* pvParameters) {
          JsonDocument doc;
          DeserializationError err = deserializeJson(doc, messageTemp);
          if (!err) {
-            for (int indice = 0; indice < NUMBER_OUTPUTS; ++indice) {
+            for (int indice = 0; indice < set->count; ++indice) {
                String key = String(indice);
 
                if (doc[key].is<bool>()) {
@@ -1083,16 +1118,23 @@ void vTaskMqttHandler(void* pvParameters) {
                   ESP_LOGI("MQTT", "Changing motor %s to %s\n", key.c_str(), state ? "on" : "off");
 
                   if (state)
-                     myPumps[indice].startPump();
+                     set->items[indice].startPump();
                   else
-                     myPumps[indice].stopPump();
+                     set->items[indice].stopPump();
                }
             }
-            ESP_LOGI("MQTT", "Motor states: M1=%d, M2=%d, M3=%d, M4=%d\n",
-                     int(myPumps[0].getPumpState()),
-                     int(myPumps[1].getPumpState()),
-                     int(myPumps[2].getPumpState()),
-                     int(myPumps[3].getPumpState()));
+            String states;
+            states.reserve(4 * set->count);
+            for (int i = 0; i < set->count; ++i) {
+               states += "M";
+               states += String(i + 1);
+               states += "=";
+               states += String(int(set->items[i].getPumpState()));
+               if (i < set->count - 1) states += ", ";
+            }
+            ESP_LOGI("MQTT", "Motor states: %s", states.c_str());
+         } else {
+            ESP_LOGE("MQTT", "Failed to parse JSON: %s", err.c_str());
          }
       }
       // 4) Trata o tópico "getdevices"
@@ -1109,21 +1151,21 @@ void vTaskMqttHandler(void* pvParameters) {
 
             JsonObject ports = jsonPayload["ports"].to<JsonObject>();
 
-            for (int indice = 0; indice < NUMBER_OUTPUTS; indice++) {
-               JsonObject port = ports[myPumps[indice].getCode()].to<JsonObject>();
-               port["gpio"] = myPumps[indice].getMotorIndex();
-               port["state"] = myPumps[indice].getPumpState();
-               port["pulseDuration"] = myPumps[indice].getPulseDuration();
+            for (int indice = 0; indice < set->count; indice++) {
+               JsonObject port = ports[set->items[indice].getCode()].to<JsonObject>();
+               port["gpio"] = set->items[indice].getMotorIndex();
+               port["state"] = set->items[indice].getPumpState();
+               port["pulseDuration"] = set->items[indice].getPulseDuration();
 
                // --- DriveTimes em memória ---
                JsonArray driveTimesArray = port["driveTimes"].to<JsonArray>();
-               for (const String& time : *(myPumps[indice].getDriveTimesPointer())) {
+               for (const String& time : *(set->items[indice].getDriveTimesPointer())) {
                   driveTimesArray.add(time);
                }
 
                // --- DriveTimes do arquivo da bomba correspondente ---
                std::set<String> fileDriveTimes;
-               String file = String("/") + myPumps[indice].getCode() + ".bin";
+               String file = String("/") + set->items[indice].getCode() + ".bin";
                if (SPIFFS.exists(file)) {
                   loadDriveTimes(fileDriveTimes, file);
                }
