@@ -4,9 +4,9 @@
 #include <Arduino.h>
 
 // Defina suas credenciais MQTT aqui
-const char* mqtt_server = "192.168.0.100";
+const char* mqtt_server = "YOUR_MQTT_SERVER";
 const uint16_t mqtt_port = 1883;
-const char* mqtt_user = "diego";
-const char* mqtt_password = "D1993rS*";
+const char* mqtt_user = "YOUR_MQTT_USER";
+const char* mqtt_password = "YOUR_MQTT_PASSWORD";
 
 #endif

@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Credenciais (use os arquivos *_Example.h como modelo)
+include/WifiCredentials.h
+include/MongoDbAtlas.h
+include/mongoDbLocal.h
+include/mqttCredentials.h
